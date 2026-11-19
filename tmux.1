@@ -1448,6 +1448,95 @@ takes the form
 .Ql VARIABLE=value
 and sets an environment variable for the newly created session; it may be
 specified multiple times.
+.Tg newr
+.It Xo Ic new\-remote\-session
+.Op Fl AdDEPRX
+.Op Fl c Ar start\-directory
+.Op Fl e Ar environment
+.Op Fl f Ar flags
+.Op Fl F Ar format
+.Op Fl H Ar host
+.Op Fl n Ar window\-name
+.Op Fl p Ar port
+.Op Fl s Ar session\-name
+.Op Fl t Ar group\-name
+.Op Fl x Ar width
+.Op Fl y Ar height
+.Op Ar user@host Op Ar shell\-command Op Ar argument ...
+.Xc
+.D1 Pq alias: Ic newr
+Create a new local session whose initial pane runs
+.Xr ssh 1
+to
+.Ar user@host
+and starts or attaches a tmux session there.
+The remote command is
+.Ql tmux new\-session \-A
+with the
+.Ic new\-session
+flags given to this command, so an existing remote session is attached.
+The host may be given with
+.Fl H
+instead of as the first positional argument; if
+.Fl H
+is used all positional arguments are part of
+.Ar shell\-command .
+Flags must precede the positional host.
+.Pp
+Outside tmux the new session is attached to the current terminal, so SSH input
+and output use the terminal's stdin and stdout.
+When run from a pane inside tmux, a detached session is created and the
+invoking client is switched to it, so the remote session fills the client
+instead of nesting a second tmux client in the pane.
+.Fl d
+creates the local session without attaching or switching.
+.Pp
+The SSH connection uses a persistent
+.Xr ssh 1
+control master and server keepalives.
+Detaching the local client leaves the SSH connection running.
+Detaching the remote tmux client leaves the control master alive and the local
+session's pane is kept with
+.Ic remain\-on\-exit ;
+attaching again reuses the existing connection.
+.Fl R
+kills the old connection and reconnects immediately, which is useful if SSH
+has hung.
+.Pp
+Before starting the remote tmux, the local
+.Pa ~/.tmux ,
+.Pa ~/.tmux.conf
+and
+.Pa ~/.config/tmux
+are copied to a private cache directory on the remote host.
+References to those paths in the copied configuration are rewritten to the
+cache directory, and the plugin manager path is set to the copied plugin
+directory, so local settings and plugins are inherited without modifying the
+remote user's files.
+Remote tmux is started with
+.Ql TERM=xterm\-256color
+so it does not depend on the remote host having a
+.Ql tmux\-256color
+terminfo entry.
+.Pp
+The local session is marked with the
+.Ic @remote_host ,
+.Ic @remote_session
+and (when
+.Fl p
+is used)
+.Ic @remote_port
+user options.
+These are available as
+.Ql #{session_remote} ,
+.Ql #{session_remote_host}
+and
+.Ql #{session_remote_session}
+and are shown by
+.Ic list\-sessions .
+The remote host must have
+.Xr tmux 1
+and a POSIX shell available.
 .Tg refresh
 .It Xo Ic refresh\-client
 .Op Fl cDlLqRSU
@@ -7769,6 +7858,9 @@ The following variables are available, where appropriate:
 .It Li "session_marked" Ta "" Ta "1 if this session contains the marked pane"
 .It Li "session_name" Ta "#S" Ta "Name of session"
 .It Li "session_path" Ta "" Ta "Working directory of session"
+.It Li "session_remote" Ta "" Ta "Remote SSH host for a remote session, if any"
+.It Li "session_remote_host" Ta "" Ta "Remote SSH host for a remote session, if any"
+.It Li "session_remote_session" Ta "" Ta "Remote tmux session name for a remote session, if any"
 .It Li "session_silence_flag" Ta "" Ta "1 if any window in session has silence alert"
 .It Li "session_stack" Ta "" Ta "Window indexes in most recent order"
 .It Li "session_windows" Ta "" Ta "Number of windows in session"

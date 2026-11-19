@@ -33,7 +33,8 @@
 	"(created #{t:session_created})"		\
 	"#{?session_grouped, (group ,}"			\
 	"#{session_group}#{?session_grouped,),}"	\
-	"#{?session_attached, (attached),}"
+	"#{?session_attached, (attached),}"		\
+	"#{?@remote_host, [remote #{@remote_host}:#{@remote_session}],}"
 
 static enum cmd_retval	cmd_list_sessions_exec(struct cmd *,
 			    struct cmdq_item *);

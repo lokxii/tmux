@@ -3178,6 +3178,41 @@ format_cb_session_path(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for session_remote and friends. */
+static void *
+format_cb_session_remote_option(struct format_tree *ft, const char *name)
+{
+	struct options_entry	*o;
+
+	if (ft->s == NULL)
+		return (NULL);
+	o = options_get_only(ft->s->options, name);
+	if (o == NULL)
+		return (NULL);
+	return (options_to_string(o, NULL, 0));
+}
+
+/* Callback for session_remote. */
+static void *
+format_cb_session_remote(struct format_tree *ft)
+{
+	return (format_cb_session_remote_option(ft, "@remote_host"));
+}
+
+/* Callback for session_remote_host. */
+static void *
+format_cb_session_remote_host(struct format_tree *ft)
+{
+	return (format_cb_session_remote_option(ft, "@remote_host"));
+}
+
+/* Callback for session_remote_session. */
+static void *
+format_cb_session_remote_session(struct format_tree *ft)
+{
+	return (format_cb_session_remote_option(ft, "@remote_session"));
+}
+
 /* Callback for session_windows. */
 static void *
 format_cb_session_windows(struct format_tree *ft)
@@ -4234,6 +4269,15 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "session_path", FORMAT_TABLE_STRING,
 	  format_cb_session_path
+	},
+	{ "session_remote", FORMAT_TABLE_STRING,
+	  format_cb_session_remote
+	},
+	{ "session_remote_host", FORMAT_TABLE_STRING,
+	  format_cb_session_remote_host
+	},
+	{ "session_remote_session", FORMAT_TABLE_STRING,
+	  format_cb_session_remote_session
 	},
 	{ "session_silence_flag", FORMAT_TABLE_STRING,
 	  format_cb_session_silence_flag
