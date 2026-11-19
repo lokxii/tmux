@@ -2664,6 +2664,41 @@ format_cb_pane_path(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for pane_remote and friends. */
+static void *
+format_cb_pane_remote_option(struct format_tree *ft, const char *name)
+{
+	struct options_entry	*o;
+
+	if (ft->wp == NULL)
+		return (NULL);
+	o = options_get_only(ft->wp->options, name);
+	if (o == NULL)
+		return (NULL);
+	return (options_to_string(o, NULL, 0));
+}
+
+/* Callback for pane_remote. */
+static void *
+format_cb_pane_remote(struct format_tree *ft)
+{
+	return (format_cb_pane_remote_option(ft, "@remote_host"));
+}
+
+/* Callback for pane_remote_host. */
+static void *
+format_cb_pane_remote_host(struct format_tree *ft)
+{
+	return (format_cb_pane_remote_option(ft, "@remote_host"));
+}
+
+/* Callback for pane_remote_session. */
+static void *
+format_cb_pane_remote_session(struct format_tree *ft)
+{
+	return (format_cb_pane_remote_option(ft, "@remote_session"));
+}
+
 /* Callback for pane_pid. */
 static void *
 format_cb_pane_pid(struct format_tree *ft)
@@ -4134,6 +4169,15 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "pane_program_state", FORMAT_TABLE_STRING,
 	  format_cb_pane_program_state
+	},
+	{ "pane_remote", FORMAT_TABLE_STRING,
+	  format_cb_pane_remote
+	},
+	{ "pane_remote_host", FORMAT_TABLE_STRING,
+	  format_cb_pane_remote_host
+	},
+	{ "pane_remote_session", FORMAT_TABLE_STRING,
+	  format_cb_pane_remote_session
 	},
 	{ "pane_right", FORMAT_TABLE_STRING,
 	  format_cb_pane_right

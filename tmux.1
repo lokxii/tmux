@@ -1485,11 +1485,18 @@ Flags must precede the positional host.
 .Pp
 Outside tmux the new session is attached to the current terminal, so SSH input
 and output use the terminal's stdin and stdout.
-When run from a pane inside tmux, a detached session is created and the
-invoking client is switched to it, so the remote session fills the client
-instead of nesting a second tmux client in the pane.
+When run from a pane inside tmux, the SSH client is instead hosted in a
+full-window modal floating pane in the invoking window, so the remote session
+expands over the client area above the status line and the client stays on its
+original session.
+The modal pane is reused by a later invocation and its identity is available
+as
+.Ql #{pane_remote} ,
+.Ql #{pane_remote_host}
+and
+.Ql #{pane_remote_session} .
 .Fl d
-creates the local session without attaching or switching.
+creates a detached local session instead of a modal pane.
 .Pp
 The SSH connection uses a persistent
 .Xr ssh 1
@@ -1499,9 +1506,15 @@ Detaching the remote tmux client leaves the control master alive and the local
 session's pane is kept with
 .Ic remain\-on\-exit ;
 attaching again reuses the existing connection.
+Before attaching to an existing live remote pane, an
+.Xr ssh 1
+liveness check runs with a five second timeout: it verifies the control
+master and then performs a multiplexed round trip through it.
+If the check fails or hangs, the old connection is killed and re-established
+automatically.
 .Fl R
-kills the old connection and reconnects immediately, which is useful if SSH
-has hung.
+performs the same reconnect immediately without waiting for the check, which
+is useful if SSH is known to have hung.
 .Pp
 Before starting the remote tmux, the local
 .Pa ~/.tmux ,
@@ -7796,6 +7809,9 @@ The following variables are available, where appropriate:
 .It Li "pane_program_message" Ta "" Ta "OSC 7501 program message"
 .It Li "pane_program_name" Ta "" Ta "OSC 7501 program name"
 .It Li "pane_program_state" Ta "" Ta "OSC 7501 program state: idle, working, done, blocked or error"
+.It Li "pane_remote" Ta "" Ta "Remote SSH host for a remote session pane, if any"
+.It Li "pane_remote_host" Ta "" Ta "Remote SSH host for a remote session pane, if any"
+.It Li "pane_remote_session" Ta "" Ta "Remote tmux session name for a remote session pane, if any"
 .It Li "pane_right" Ta "" Ta "Right of pane"
 .It Li "pane_search_string" Ta "" Ta "Last search string in copy mode"
 .It Li "pane_start_command" Ta "" Ta "Command pane started with"

@@ -17,9 +17,11 @@
  */
 
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -94,15 +96,27 @@ static const char remote_bootstrap[] =
 	"exec tmux \"$@\"\n";
 
 struct cmd_new_remote_session_data {
+	u_int	 window;
 	char	*host;
 	char	*name;
 	char	*port;
+};
+
+struct cmd_new_remote_check_data {
+	struct cmdq_item	*item;
+	struct job		*job;
+	struct event		 timer;
+	int			 timed_out;
+	char			*respawn;
+	char			*show;
 };
 
 static enum cmd_retval	cmd_new_remote_session_exec(struct cmd *,
 			    struct cmdq_item *);
 static enum cmd_retval	cmd_new_remote_session_done(struct cmdq_item *,
 			    void *);
+static void		cmd_new_remote_check_timeout(int, short, void *);
+static void		cmd_new_remote_check_free(void *);
 
 const struct cmd_entry cmd_new_remote_session_entry = {
 	.name = "new-remote-session",
@@ -219,14 +233,14 @@ remote_default_name(const char *host)
 	return (out);
 }
 
-/* Get a string session user option, or NULL if not set. */
+/* Get a string user option from an options set, or NULL if not set. */
 static char *
-remote_session_option(struct session *s, const char *name)
+remote_option(struct options *oo, const char *name)
 {
 	struct options_entry	*o;
 	char			*value;
 
-	o = options_get_only(s->options, name);
+	o = options_get_only(oo, name);
 	if (o == NULL)
 		return (NULL);
 	value = options_to_string(o, NULL, 0);
@@ -235,6 +249,50 @@ remote_session_option(struct session *s, const char *name)
 		return (NULL);
 	}
 	return (value);
+}
+
+/* Get a string session user option, or NULL if not set. */
+static char *
+remote_session_option(struct session *s, const char *name)
+{
+	return (remote_option(s->options, name));
+}
+
+/* Get a string pane user option, or NULL if not set. */
+static char *
+remote_pane_option(struct window_pane *wp, const char *name)
+{
+	return (remote_option(wp->options, name));
+}
+
+/* Does this pane belong to the remote host and session? */
+static int
+remote_pane_matches(struct window_pane *wp, const char *host, const char *name)
+{
+	char	*h, *n;
+	int	 match = 0;
+
+	h = remote_pane_option(wp, "@remote_host");
+	n = remote_pane_option(wp, "@remote_session");
+	if (h != NULL && n != NULL && strcmp(h, host) == 0 &&
+	    strcmp(n, name) == 0)
+		match = 1;
+	free(h);
+	free(n);
+	return (match);
+}
+
+/* Find an existing remote modal pane. */
+static struct window_pane *
+remote_find_pane(const char *host, const char *name)
+{
+	struct window_pane	*wp;
+
+	RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
+		if (remote_pane_matches(wp, host, name))
+			return (wp);
+	}
+	return (NULL);
 }
 
 /* Add a flag and optional value to a tmux argument vector. */
@@ -372,33 +430,42 @@ remote_queue(struct cmdq_item *after, const char *fmt, ...)
 	return (cmdq_insert_after(after, item));
 }
 
+/* Build a respawn-pane command for a remote pane. */
+static char *
+remote_build_respawn(struct window_pane *wp, int argc, char **argv)
+{
+	char	*command, *line;
+
+	command = cmd_stringify_argv(argc, argv);
+	xasprintf(&line, "respawn-pane -k -t %%%u -- %s", wp->id, command);
+	free(command);
+	return (line);
+}
+
 /* Queue a respawn of a remote pane with a fresh helper. */
 static struct cmdq_item *
 remote_queue_respawn(struct cmdq_item *after, struct window_pane *wp,
     int argc, char **argv)
 {
-	char			*command;
+	char			*line;
 	struct cmdq_item	*item;
 
-	command = cmd_stringify_argv(argc, argv);
-	item = remote_queue(after, "respawn-pane -k -t %%%u -- %s", wp->id,
-	    command);
-	free(command);
+	line = remote_build_respawn(wp, argc, argv);
+	item = remote_queue(after, "%s", line);
+	free(line);
 	return (item);
 }
 
-/* Queue attach or switch to an existing local session. */
-static struct cmdq_item *
-remote_queue_attach(struct cmdq_item *after, const char *name,
-    struct args *args, int inside)
+/* Build a command to attach or switch to an existing local session. */
+static char *
+remote_build_attach(const char *name, struct args *args, int inside)
 {
-	char			*escaped, *flags = NULL, *tmp;
-	struct cmdq_item	*item;
-	size_t			 len = 0;
+	char	*escaped, *flags = NULL, *tmp, *line;
+	size_t	 len = 0;
 
 	escaped = args_escape(name);
 	if (inside) {
-		item = remote_queue(after, "switch-client -t %s", escaped);
+		xasprintf(&line, "switch-client -t %s", escaped);
 	} else {
 		remote_cat(&flags, &len, "");
 		if (args_has(args, 'D'))
@@ -413,12 +480,52 @@ remote_queue_attach(struct cmdq_item *after, const char *name,
 			remote_cat(&flags, &len, tmp);
 			free(tmp);
 		}
-		item = remote_queue(after, "attach-session%s -t %s", flags,
-		    escaped);
+		xasprintf(&line, "attach-session%s -t %s", flags, escaped);
 		free(flags);
 	}
 	free(escaped);
-	return (item);
+	return (line);
+}
+
+/* Build a command to show an existing modal pane to the current client. */
+static char *
+remote_build_show(struct window_pane *wp, struct session *current)
+{
+	struct cmd_find_state	 fs;
+	char			*name, *line = NULL;
+	size_t			 len = 0;
+
+	if (cmd_find_from_pane(&fs, wp, 0) != 0)
+		fs.s = NULL;
+
+	remote_cat(&line, &len, "");
+	if (current == NULL || fs.s != current) {
+		if (fs.s != NULL) {
+			name = args_escape(fs.s->name);
+			remote_cat(&line, &len, "switch-client -t ");
+			remote_cat(&line, &len, name);
+			remote_cat(&line, &len, "; ");
+			free(name);
+		}
+	}
+	xasprintf(&name, "select-window -t @%u", wp->window->id);
+	remote_cat(&line, &len, name);
+	free(name);
+	return (line);
+}
+
+/* Mark a pane as handling a remote session. */
+static void
+remote_mark_pane(struct window_pane *wp, struct cmd_new_remote_session_data *d)
+{
+	options_set_string(wp->options, "@remote_host", 0, "%s", d->host);
+	options_set_string(wp->options, "@remote_session", 0, "%s", d->name);
+	if (d->port != NULL)
+		options_set_string(wp->options, "@remote_port", 0, "%s",
+		    d->port);
+	options_set_number(wp->options, "remain-on-exit", 1);
+	options_set_string(wp->options, "remain-on-exit-format", 0,
+	    "disconnected from %s", d->host);
 }
 
 /* Set the metadata and lifetime options once the new session exists. */
@@ -428,23 +535,36 @@ cmd_new_remote_session_done(__unused struct cmdq_item *item, void *data)
 	struct cmd_new_remote_session_data	*d = data;
 	struct session				*s;
 	struct winlink				*wl;
+	struct window				*w;
 	struct window_pane			*wp;
 
-	s = session_find(d->name);
-	if (s != NULL) {
-		options_set_string(s->options, "@remote_host", 0, "%s",
-		    d->host);
-		options_set_string(s->options, "@remote_session", 0, "%s",
-		    d->name);
-		if (d->port != NULL)
-			options_set_string(s->options, "@remote_port", 0, "%s",
-			    d->port);
-		options_set_number(s->options, "destroy-unattached", 0);
-		wl = s->curw;
-		if (wl != NULL && (wp = wl->window->active) != NULL) {
-			options_set_number(wp->options, "remain-on-exit", 1);
-			options_set_string(wp->options, "remain-on-exit-format",
-			    0, "disconnected from %s", d->host);
+	if (d->window != UINT_MAX) {
+		w = window_find_by_id(d->window);
+		if (w != NULL) {
+			wp = w->modal;
+			if (wp == NULL)
+				wp = w->active;
+			if (wp != NULL)
+				remote_mark_pane(wp, d);
+			options_set_string(w->options, "@remote_host", 0, "%s",
+			    d->host);
+			options_set_string(w->options, "@remote_session", 0,
+			    "%s", d->name);
+		}
+	} else {
+		s = session_find(d->name);
+		if (s != NULL) {
+			options_set_string(s->options, "@remote_host", 0, "%s",
+			    d->host);
+			options_set_string(s->options, "@remote_session", 0,
+			    "%s", d->name);
+			if (d->port != NULL)
+				options_set_string(s->options, "@remote_port",
+				    0, "%s", d->port);
+			options_set_number(s->options, "destroy-unattached", 0);
+			wl = s->curw;
+			if (wl != NULL && (wp = wl->window->active) != NULL)
+				remote_mark_pane(wp, d);
 		}
 	}
 
@@ -453,6 +573,100 @@ cmd_new_remote_session_done(__unused struct cmdq_item *item, void *data)
 	free(d->port);
 	free(d);
 	return (CMD_RETURN_NORMAL);
+}
+
+/* Timer callback for a hung SSH liveness check. */
+static void
+cmd_new_remote_check_timeout(__unused int fd, __unused short events, void *data)
+{
+	struct cmd_new_remote_check_data	*cd = data;
+
+	/*
+	 * job_free() calls the free callback, which queues the reconnect and
+	 * releases the command. Do not touch cd after this.
+	 */
+	cd->timed_out = 1;
+	job_free(cd->job);
+}
+
+/* Job free callback: continue the attach once the liveness check is done. */
+static void
+cmd_new_remote_check_free(void *data)
+{
+	struct cmd_new_remote_check_data	*cd = data;
+	struct cmdq_item			*after = cd->item, *next;
+	int					 status, ok;
+
+	evtimer_del(&cd->timer);
+	status = job_get_status(cd->job);
+	ok = !cd->timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+	log_debug("%s: ok=%d timed_out=%d status=%d", __func__, ok,
+	    cd->timed_out, status);
+
+	if (!ok && cd->respawn != NULL) {
+		next = remote_queue(after, "%s", cd->respawn);
+		if (next != NULL)
+			after = next;
+	}
+	if (cd->show != NULL)
+		remote_queue(after, "%s", cd->show);
+	cmdq_continue(cd->item);
+
+	free(cd->respawn);
+	free(cd->show);
+	free(cd);
+}
+
+/*
+ * Start an asynchronous SSH liveness check. If the control connection is
+ * gone or stops responding within the timeout, cd->respawn (built with force
+ * reconnect) runs before cd->show.
+ */
+static int
+remote_start_check(struct cmdq_item *item, struct session *s,
+    const char *host, const char *ctl, char *respawn, char *show)
+{
+	struct cmd_new_remote_check_data	*cd;
+	struct timeval				 tv = { 5, 0 };
+	char					*command = NULL, *quoted;
+	size_t					 len = 0;
+
+	cd = xcalloc(1, sizeof *cd);
+	cd->item = item;
+	cd->respawn = respawn;
+	cd->show = show;
+
+	remote_cat(&command, &len, "ssh -O check -o ControlPath=");
+	quoted = remote_sh_quote(ctl);
+	remote_cat(&command, &len, quoted);
+	free(quoted);
+	remote_cat(&command, &len, " ");
+	quoted = remote_sh_quote(host);
+	remote_cat(&command, &len, quoted);
+	free(quoted);
+	remote_cat(&command, &len,
+	    " && ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=");
+	quoted = remote_sh_quote(ctl);
+	remote_cat(&command, &len, quoted);
+	free(quoted);
+	remote_cat(&command, &len, " ");
+	quoted = remote_sh_quote(host);
+	remote_cat(&command, &len, quoted);
+	free(quoted);
+	remote_cat(&command, &len, " true");
+
+	log_debug("%s: %s", __func__, command);
+	cd->job = job_run(command, 0, NULL, NULL, s, NULL, NULL, NULL,
+	    cmd_new_remote_check_free, cd, 0, -1, -1);
+	free(command);
+	if (cd->job == NULL) {
+		free(cd);
+		return (-1);
+	}
+
+	evtimer_set(&cd->timer, cmd_new_remote_check_timeout, cd);
+	evtimer_add(&cd->timer, &tv);
+	return (0);
 }
 
 static enum cmd_retval
@@ -464,7 +678,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct cmdq_item		*after = item, *next;
 	struct session			*s;
 	struct winlink			*wl;
-	struct window_pane		*wp;
+	struct window_pane		*wp, *mwp;
 	struct environ_entry		*ee;
 	struct cmd_new_remote_session_data *data;
 	const char			*value, *errstr;
@@ -474,12 +688,16 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	const char			*runtime;
 	char				*remote = NULL, *ssh = NULL;
 	char				*nflags = NULL, *rhost = NULL;
-	char				*escaped, *tmp;
+	char				*escaped, *tmp, *title = NULL;
+	char				*respawn = NULL, *show = NULL;
 	size_t				 nlen = 0;
 	char				**argv = NULL, **rargv = NULL, **hargv = NULL;
+	char				**fargv = NULL;
 	int				 argc = 0, rargc = 0, hargc = 0;
+	int				 fargc = 0;
 	int				 offset = 0, inside = 0, force, detached;
 	int				 dead = 0;
+	enum cmd_retval			 retval = CMD_RETURN_NORMAL;
 
 	force = args_has(args, 'R');
 	detached = args_has(args, 'd');
@@ -553,6 +771,48 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	hargv = remote_build_helper_argv(host, port, ctl, hash, remote, force,
 	    &hargc);
 
+	/*
+	 * When run from inside tmux, show the remote session in a full-size
+	 * modal pane in the invoking window rather than switching sessions.
+	 * Reuse an existing remote modal pane when there is one.
+	 */
+	if (inside && !detached) {
+		mwp = remote_find_pane(host, name);
+		if (mwp != NULL) {
+			dead = window_pane_exited(mwp);
+			show = remote_build_show(mwp, fs.s);
+			if (!force && !dead) {
+				fargv = remote_build_helper_argv(host, port,
+				    ctl, hash, remote, 1, &fargc);
+				respawn = remote_build_respawn(mwp, fargc,
+				    fargv);
+				if (remote_start_check(item, fs.s, host, ctl,
+				    respawn, show) == 0) {
+					respawn = NULL;
+					show = NULL;
+					retval = CMD_RETURN_WAIT;
+				} else {
+					next = remote_queue(after, "%s",
+					    respawn);
+					if (next != NULL)
+						after = next;
+					next = remote_queue(after, "%s", show);
+					if (next != NULL)
+						after = next;
+				}
+			} else {
+				next = remote_queue_respawn(after, mwp, hargc,
+				    hargv);
+				if (next != NULL)
+					after = next;
+				next = remote_queue(after, "%s", show);
+				if (next != NULL)
+					after = next;
+			}
+			goto done;
+		}
+	}
+
 	s = session_find(name);
 	if (s != NULL) {
 		rhost = remote_session_option(s, "@remote_host");
@@ -591,20 +851,75 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		options_set_string(wp->options, "remain-on-exit-format", 0,
 		    "disconnected from %s", host);
 
-		if (force || dead) {
+		if (!detached)
+			show = remote_build_attach(name, args, inside);
+		if (!detached && !force && !dead) {
+			fargv = remote_build_helper_argv(host, port, ctl, hash,
+			    remote, 1, &fargc);
+			respawn = remote_build_respawn(wp, fargc, fargv);
+			if (remote_start_check(item, s, host, ctl, respawn,
+			    show) == 0) {
+				respawn = NULL;
+				show = NULL;
+				retval = CMD_RETURN_WAIT;
+			} else {
+				next = remote_queue(after, "%s", respawn);
+				if (next != NULL)
+					after = next;
+				next = remote_queue(after, "%s", show);
+				if (next != NULL)
+					after = next;
+			}
+		} else if (force || dead) {
 			next = remote_queue_respawn(after, wp, hargc, hargv);
 			if (next != NULL)
 				after = next;
-		}
-		if (!detached) {
-			next = remote_queue_attach(after, name, args, inside);
-			if (next != NULL)
-				after = next;
+			if (show != NULL) {
+				next = remote_queue(after, "%s", show);
+				if (next != NULL)
+					after = next;
+			}
 		}
 		goto done;
 	}
 
 	ssh = cmd_stringify_argv(hargc, hargv);
+
+	/* Inside tmux, create the SSH session in a full-size modal pane. */
+	if (inside && !detached) {
+		if (wp == NULL || wp->window == NULL) {
+			cmdq_error(item, "no current pane");
+			goto fail;
+		}
+		if (wp->window->modal != NULL) {
+			cmdq_error(item, "window already has a modal pane");
+			goto fail;
+		}
+		if ((value = args_get(args, 'n')) != NULL)
+			title = format_single(item, value, c, NULL, NULL,
+			    NULL);
+		else
+			xasprintf(&title, "remote %s:%s", host, name);
+		escaped = args_escape(title);
+		next = remote_queue(after,
+		    "new-pane -O -x 100%% -y 100%% -X 0 -Y 0 -T %s "
+		    "-t %%%u -- %s", escaped, wp->id, ssh);
+		free(escaped);
+		if (next == NULL)
+			goto fail;
+		after = next;
+
+		data = xcalloc(1, sizeof *data);
+		data->window = wp->window->id;
+		data->host = xstrdup(host);
+		data->name = xstrdup(name);
+		if (port != NULL)
+			data->port = xstrdup(port);
+		after = cmdq_insert_after(after,
+		    cmdq_get_callback(cmd_new_remote_session_done, data));
+		goto done;
+	}
+
 	remote_cat(&nflags, &nlen, "");
 	if (args_has(args, 'D'))
 		remote_cat(&nflags, &nlen, " -D");
@@ -627,18 +942,13 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	after = next;
 
 	data = xcalloc(1, sizeof *data);
+	data->window = UINT_MAX;
 	data->host = xstrdup(host);
 	data->name = xstrdup(name);
 	if (port != NULL)
 		data->port = xstrdup(port);
 	after = cmdq_insert_after(after,
 	    cmdq_get_callback(cmd_new_remote_session_done, data));
-
-	if (inside && !detached) {
-		next = remote_queue_attach(after, name, args, inside);
-		if (next != NULL)
-			after = next;
-	}
 
 done:
 	free(host);
@@ -650,10 +960,14 @@ done:
 	free(ssh);
 	free(nflags);
 	free(rhost);
+	free(title);
+	free(respawn);
+	free(show);
 	cmd_free_argv(argc, argv);
 	cmd_free_argv(rargc, rargv);
 	cmd_free_argv(hargc, hargv);
-	return (CMD_RETURN_NORMAL);
+	cmd_free_argv(fargc, fargv);
+	return (retval);
 
 fail:
 	free(host);
@@ -665,6 +979,10 @@ fail:
 	free(ssh);
 	free(nflags);
 	free(rhost);
+	free(title);
+	free(respawn);
+	free(show);
+	cmd_free_argv(fargc, fargv);
 	cmd_free_argv(argc, argv);
 	cmd_free_argv(rargc, rargv);
 	cmd_free_argv(hargc, hargv);
