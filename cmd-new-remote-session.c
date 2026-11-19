@@ -265,6 +265,17 @@ remote_pane_option(struct window_pane *wp, const char *name)
 	return (remote_option(wp->options, name));
 }
 
+/* Is this pane running the remote helper? */
+static int
+remote_pane_is_helper(struct window_pane *wp)
+{
+	if (wp->argc < 3 || wp->argv == NULL)
+		return (0);
+	return (strcmp(wp->argv[0], "sh") == 0 &&
+	    strcmp(wp->argv[1], "-c") == 0 &&
+	    strcmp(wp->argv[2], remote_helper) == 0);
+}
+
 /* Does this pane belong to the remote host and session? */
 static int
 remote_pane_matches(struct window_pane *wp, const char *host, const char *name)
@@ -272,6 +283,8 @@ remote_pane_matches(struct window_pane *wp, const char *host, const char *name)
 	char	*h, *n;
 	int	 match = 0;
 
+	if (!remote_pane_is_helper(wp))
+		return (0);
 	h = remote_pane_option(wp, "@remote_host");
 	n = remote_pane_option(wp, "@remote_session");
 	if (h != NULL && n != NULL && strcmp(h, host) == 0 &&
@@ -518,6 +531,8 @@ remote_build_show(struct window_pane *wp, struct session *current)
 static void
 remote_mark_pane(struct window_pane *wp, struct cmd_new_remote_session_data *d)
 {
+	if (!remote_pane_is_helper(wp))
+		return;
 	options_set_string(wp->options, "@remote_host", 0, "%s", d->host);
 	options_set_string(wp->options, "@remote_session", 0, "%s", d->name);
 	if (d->port != NULL)
