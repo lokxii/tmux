@@ -47,15 +47,17 @@ future enhancement; the metadata and command surface below would not block it.
 
 ```
 new-remote-session [-AdDEPRX] [-c start-directory] [-e environment]
-                   [-F format] [-f flags] [-H host] [-n window-name]
-                   [-p port] [-s session-name] [-t target-session]
-                   [-x width] [-y height]
+                   [-F format] [-f flags] [-H host] [-i identity-file]
+                   [-n window-name] [-p port] [-s session-name]
+                   [-t target-session] [-x width] [-y height]
                    [user@host] [shell-command [argument ...]]
 ```
 
 - **Host** comes from `-H host` or, if absent, the first positional argument.
   The remaining positional arguments are the remote `shell-command`.
 - **`-p port`** is passed to `ssh -p`.
+- **`-i identity-file`** is passed to `ssh -i` for both the configuration copy
+  and the interactive session.
 - **`-R`** forces a fresh SSH connection (kills the old pane and control
   master) before attaching.
 - All `new-session` flags/options are accepted. Flags meaningful to the remote

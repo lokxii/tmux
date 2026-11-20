@@ -26,6 +26,7 @@ SKIPPED=0
 
 REMOTE_HOST=${REMOTE_HOST:-}
 REMOTE_PORT=${REMOTE_PORT:-}
+SSH_IDENTITY=${SSH_IDENTITY:-}
 TMUX_BIN=${TMUX_BIN:-}
 LOCAL_TEST_ROOT=${LOCAL_TEST_ROOT:-}
 KEEP_TEST_ROOT=${KEEP_TEST_ROOT:-0}
@@ -64,6 +65,7 @@ acts as the local tmux host; REMOTE_HOST is a reachable SSH target.
 Environment:
   REMOTE_HOST       required for a real run, for example user@server
   REMOTE_PORT       optional SSH port
+  SSH_IDENTITY      optional SSH private key passed to ssh and -i
   TMUX_BIN          local tmux binary (default: $REPO_ROOT/tmux if
                     executable, otherwise "tmux" from PATH)
   LOCAL_TEST_ROOT   optional parent directory for the disposable test root
@@ -272,6 +274,22 @@ tmux_outer()
 	"$TMUX_BIN" -L "$OUTERSOCK" -f /dev/null "$@"
 }
 
+new_remote_main()
+{
+	if [ -n "$REMOTE_PORT" ] && [ -n "$SSH_IDENTITY" ]; then
+		tmux_main new-remote-session -H "$REMOTE_HOST" \
+		    -p "$REMOTE_PORT" -i "$SSH_IDENTITY" "$@"
+	elif [ -n "$REMOTE_PORT" ]; then
+		tmux_main new-remote-session -H "$REMOTE_HOST" \
+		    -p "$REMOTE_PORT" "$@"
+	elif [ -n "$SSH_IDENTITY" ]; then
+		tmux_main new-remote-session -H "$REMOTE_HOST" \
+		    -i "$SSH_IDENTITY" "$@"
+	else
+		tmux_main new-remote-session -H "$REMOTE_HOST" "$@"
+	fi
+}
+
 # tmux can leave an empty socket file behind after kill-server.  Remove only
 # the uniquely named sockets created by this run.
 remove_local_sockets()
@@ -322,11 +340,23 @@ local_sanity()
 
 ssh_exec()
 {
-	if [ -n "$REMOTE_PORT" ]; then
+	if [ -n "$REMOTE_PORT" ] && [ -n "$SSH_IDENTITY" ]; then
 		exec ssh -o BatchMode=yes -o ConnectTimeout=10 \
 		    -o ControlMaster=auto -o ControlPath="$PROBE_CTL" \
 		    -o ControlPersist=yes -o ServerAliveInterval=15 \
 		    -o ServerAliveCountMax=3 -p "$REMOTE_PORT" \
+		    -i "$SSH_IDENTITY" "$REMOTE_HOST" "$@"
+	elif [ -n "$REMOTE_PORT" ]; then
+		exec ssh -o BatchMode=yes -o ConnectTimeout=10 \
+		    -o ControlMaster=auto -o ControlPath="$PROBE_CTL" \
+		    -o ControlPersist=yes -o ServerAliveInterval=15 \
+		    -o ServerAliveCountMax=3 -p "$REMOTE_PORT" \
+		    "$REMOTE_HOST" "$@"
+	elif [ -n "$SSH_IDENTITY" ]; then
+		exec ssh -o BatchMode=yes -o ConnectTimeout=10 \
+		    -o ControlMaster=auto -o ControlPath="$PROBE_CTL" \
+		    -o ControlPersist=yes -o ServerAliveInterval=15 \
+		    -o ServerAliveCountMax=3 -i "$SSH_IDENTITY" \
 		    "$REMOTE_HOST" "$@"
 	fi
 	exec ssh -o BatchMode=yes -o ConnectTimeout=10 \
@@ -531,6 +561,10 @@ make_scripts()
 	if [ -n "$REMOTE_PORT" ]; then
 		_q_port=$(quote_sh "$REMOTE_PORT")
 	fi
+	_q_id=
+	if [ -n "$SSH_IDENTITY" ]; then
+		_q_id=$(quote_sh "$SSH_IDENTITY")
+	fi
 
 	{
 		printf '#!/bin/sh\n'
@@ -539,6 +573,9 @@ make_scripts()
 		    "$_q_bin" "$_q_sock" "$_q_host"
 		if [ -n "$_q_port" ]; then
 			printf ' -p %s' "$_q_port"
+		fi
+		if [ -n "$_q_id" ]; then
+			printf ' -i %s' "$_q_id"
 		fi
 		printf ' "$@"\n'
 	} >"$ROOT/bin/cli" || exit 1
@@ -556,6 +593,9 @@ make_scripts()
 		    "$_q_bin" "$_q_sock" "$_q_host"
 		if [ -n "$_q_port" ]; then
 			printf ' -p %s' "$_q_port"
+		fi
+		if [ -n "$_q_id" ]; then
+			printf ' -i %s' "$_q_id"
 		fi
 		printf ' "$@"\n'
 	} >"$ROOT/bin/inside" || exit 1
@@ -1122,17 +1162,9 @@ test_flags()
 	_fw_val="flagval_${SUFFIX}"
 	_fw_cmd="printf 'RFLAG_%s\\n' \"\$TMUXRS_TEST\"; exec sleep 120"
 
-	if [ -n "$REMOTE_PORT" ]; then
-		tmux_main new-remote-session -d -H "$REMOTE_HOST" \
-		    -p "$REMOTE_PORT" -s "$FLAGS" -c /tmp \
-		    -e "TMUXRS_TEST=$_fw_val" -n "$_fw_win" \
-		    -x 91 -y 27 -- sh -c "$_fw_cmd"
-	else
-		tmux_main new-remote-session -d -H "$REMOTE_HOST" \
-		    -s "$FLAGS" -c /tmp \
-		    -e "TMUXRS_TEST=$_fw_val" -n "$_fw_win" \
-		    -x 91 -y 27 -- sh -c "$_fw_cmd"
-	fi
+	new_remote_main -d -s "$FLAGS" -c /tmp \
+	    -e "TMUXRS_TEST=$_fw_val" -n "$_fw_win" \
+	    -x 91 -y 27 -- sh -c "$_fw_cmd"
 	if [ "$?" -ne 0 ]; then
 		fail "new-remote-session rejected the flag test"
 		return

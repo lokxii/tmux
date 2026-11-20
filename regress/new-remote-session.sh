@@ -79,6 +79,14 @@ $TMUX list-sessions | grep -F '[remote example.test:remote-test]' >/dev/null ||
 grep -F "new-session" "$FAKE_SSH_LOG" | grep -F "'-A'" |
 	grep -F "'-s' 'remote-test'" >/dev/null || exit 1
 
+# -i is passed to the SSH helper.
+: >"$FAKE_SSH_LOG"
+$TMUX new-remote-session -d -H example.test -s remote-key \
+    -i /tmp/fake-identity || exit 1
+sleep 1
+grep -F -- '-i /tmp/fake-identity' "$FAKE_SSH_LOG" >/dev/null || exit 1
+$TMUX kill-session -t remote-key || exit 1
+
 # Exiting ssh leaves the local session and pane alive.
 pid=$($TMUX list-panes -t remote-test -F '#{pane_pid}') || exit 1
 kill "$pid" || exit 1

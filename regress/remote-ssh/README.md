@@ -41,6 +41,10 @@ configure a key or agent first.
 REMOTE_HOST=user@remote-host REMOTE_PORT=2222 \
     sh regress/remote-ssh/run.sh
 
+# Use a specific SSH private key (passed to ssh -i and the feature's -i)
+REMOTE_HOST=user@remote-host SSH_IDENTITY=$HOME/.ssh/id_ed25519 \
+    sh regress/remote-ssh/run.sh
+
 # Use a specific local tmux binary
 REMOTE_HOST=user@remote-host \
     TMUX_BIN=/path/to/tmux sh regress/remote-ssh/run.sh
@@ -76,7 +80,8 @@ Local (laptop):
 - A built `tmux` containing `new-remote-session` (or `TMUX_BIN` pointing at
   one).
 - Working SSH authentication to the target, already verified with
-  `ssh -o BatchMode=yes user@remote-host true`.
+  `ssh -o BatchMode=yes user@remote-host true` (or with the same
+  `SSH_IDENTITY` setting).
 
 Remote:
 

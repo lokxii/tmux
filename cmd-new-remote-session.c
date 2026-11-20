@@ -45,7 +45,7 @@
  */
 static const char remote_helper[] =
 	"set -e\n"
-	"host=$1; port=$2; ctl=$3; hash=$4; cmd=$5; force=$6\n"
+	"host=$1; port=$2; ctl=$3; hash=$4; cmd=$5; force=$6; key=$7\n"
 	"mkdir -p \"${ctl%/*}\" 2>/dev/null || :\n"
 	"chmod 700 \"${ctl%/*}\" 2>/dev/null || :\n"
 	"set -- -o ControlMaster=auto -o ControlPath=\"$ctl\" "
@@ -53,6 +53,7 @@ static const char remote_helper[] =
 	"-o ServerAliveCountMax=3 -o TCPKeepAlive=yes "
 	"-o ConnectTimeout=10\n"
 	"[ -n \"$port\" ] && set -- \"$@\" -p \"$port\"\n"
+	"[ -n \"$key\" ] && set -- \"$@\" -i \"$key\"\n"
 	"if [ \"$force\" = 1 ]; then\n"
 	"  ssh -o ControlPath=\"$ctl\" -O exit \"$host\" "
 	">/dev/null 2>&1 || :\n"
@@ -123,10 +124,10 @@ const struct cmd_entry cmd_new_remote_session_entry = {
 	.description = "Create a new remote session.",
 	.alias = "newr",
 
-	.args = { "Ac:dDe:EF:f:H:n:Pp:Rs:t:x:Xy:", 0, -1, NULL },
+	.args = { "Ac:dDe:EF:f:H:i:n:Pp:Rs:t:x:Xy:", 0, -1, NULL },
 	.usage = "[-AdDEPRX] [-c start-directory] [-e environment] "
-		 "[-F format] [-f flags] [-H host] [-n window-name] "
-		 "[-p port] [-s session-name] "
+		 "[-F format] [-f flags] [-H host] [-i identity-file] "
+		 "[-n window-name] [-p port] [-s session-name] "
 		 CMD_TARGET_SESSION_USAGE " [-x width] [-y height] "
 		 "[user@host] [shell-command [argument ...]]",
 
@@ -399,7 +400,8 @@ remote_build_command(const char *hash, int argc, char **argv)
 /* Build the local argv which runs the helper in the pane. */
 static char **
 remote_build_helper_argv(const char *host, const char *port, const char *ctl,
-    const char *hash, const char *command, int force, int *argc)
+    const char *hash, const char *command, int force, const char *key,
+    int *argc)
 {
 	char	**argv = NULL;
 
@@ -414,6 +416,7 @@ remote_build_helper_argv(const char *host, const char *port, const char *ctl,
 	cmd_append_argv(argc, &argv, hash);
 	cmd_append_argv(argc, &argv, command);
 	cmd_append_argv(argc, &argv, force ? "1" : "0");
+	cmd_append_argv(argc, &argv, key == NULL ? "" : key);
 	return (argv);
 }
 
@@ -697,7 +700,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct environ_entry		*ee;
 	struct cmd_new_remote_session_data *data;
 	const char			*value, *errstr;
-	char				*host = NULL, *port = NULL;
+	char				*host = NULL, *port = NULL, *key = NULL;
 	char				*ename, *name = NULL, *hash = NULL;
 	char				*ctl = NULL;
 	const char			*runtime;
@@ -739,6 +742,13 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		(void)strtonum(port, 1, 65535, &errstr);
 		if (errstr != NULL) {
 			cmdq_error(item, "port %s", errstr);
+			goto fail;
+		}
+	}
+	if ((value = args_get(args, 'i')) != NULL) {
+		key = format_single(item, value, c, NULL, NULL, NULL);
+		if (*key == '\0' || strpbrk(key, "\t\r\n") != NULL) {
+			cmdq_error(item, "invalid identity file: %s", key);
 			goto fail;
 		}
 	}
@@ -784,7 +794,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	    &rargv);
 	remote = remote_build_command(hash, rargc, rargv);
 	hargv = remote_build_helper_argv(host, port, ctl, hash, remote, force,
-	    &hargc);
+	    key, &hargc);
 
 	/*
 	 * When run from inside tmux, show the remote session in a full-size
@@ -798,7 +808,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 			show = remote_build_show(mwp, fs.s);
 			if (!force && !dead) {
 				fargv = remote_build_helper_argv(host, port,
-				    ctl, hash, remote, 1, &fargc);
+				    ctl, hash, remote, 1, key, &fargc);
 				respawn = remote_build_respawn(mwp, fargc,
 				    fargv);
 				if (remote_start_check(item, fs.s, host, ctl,
@@ -870,7 +880,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 			show = remote_build_attach(name, args, inside);
 		if (!detached && !force && !dead) {
 			fargv = remote_build_helper_argv(host, port, ctl, hash,
-			    remote, 1, &fargc);
+			    remote, 1, key, &fargc);
 			respawn = remote_build_respawn(wp, fargc, fargv);
 			if (remote_start_check(item, s, host, ctl, respawn,
 			    show) == 0) {
@@ -968,6 +978,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 done:
 	free(host);
 	free(port);
+	free(key);
 	free(name);
 	free(hash);
 	free(ctl);
@@ -987,6 +998,7 @@ done:
 fail:
 	free(host);
 	free(port);
+	free(key);
 	free(name);
 	free(hash);
 	free(ctl);

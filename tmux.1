@@ -1456,6 +1456,7 @@ specified multiple times.
 .Op Fl f Ar flags
 .Op Fl F Ar format
 .Op Fl H Ar host
+.Op Fl i Ar identity\-file
 .Op Fl n Ar window\-name
 .Op Fl p Ar port
 .Op Fl s Ar session\-name
@@ -1482,6 +1483,14 @@ instead of as the first positional argument; if
 is used all positional arguments are part of
 .Ar shell\-command .
 Flags must precede the positional host.
+.Pp
+.Fl i
+selects the SSH private key file, equivalent to
+.Xr ssh 1 Ns 's
+.Fl i
+flag.
+The file is passed to the SSH clients used for both the configuration copy and
+the interactive remote session.
 .Pp
 Outside tmux the new session is attached to the current terminal, so SSH input
 and output use the terminal's stdin and stdout.
