@@ -541,9 +541,7 @@ remote_mark_pane(struct window_pane *wp, struct cmd_new_remote_session_data *d)
 	if (d->port != NULL)
 		options_set_string(wp->options, "@remote_port", 0, "%s",
 		    d->port);
-	options_set_number(wp->options, "remain-on-exit", 1);
-	options_set_string(wp->options, "remain-on-exit-format", 0,
-	    "disconnected from %s", d->host);
+	options_set_number(wp->options, "remain-on-exit", 0);
 }
 
 /* Set the metadata and lifetime options once the new session exists. */
@@ -872,9 +870,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 			goto fail;
 		}
 		dead = window_pane_exited(wp);
-		options_set_number(wp->options, "remain-on-exit", 1);
-		options_set_string(wp->options, "remain-on-exit-format", 0,
-		    "disconnected from %s", host);
+		options_set_number(wp->options, "remain-on-exit", 0);
 
 		if (!detached)
 			show = remote_build_attach(name, args, inside);

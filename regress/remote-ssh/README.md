@@ -129,7 +129,7 @@ No root is required on either side.
    new client can reattach without respawning the pane.
 9. **Remote detach and ControlMaster** — runs `tmux detach-client` on the remote
    (independent of the remote prefix binding), verifies the local SSH pane
-   exits while the local session is kept by `remain-on-exit`, verifies the
+   exits and its single-pane local session is destroyed, verifies the
    persistent control master survives, then reattaches and verifies the same
    control path and socket inode are reused.
 10. **Hung SSH reconnect** — locates the local persistent mux master and its

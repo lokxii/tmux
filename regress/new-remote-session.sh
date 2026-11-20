@@ -74,7 +74,7 @@ $TMUX list-sessions | grep -F '[remote example.test:remote-test]' >/dev/null ||
 	exit 1
 [ "$($TMUX show-options -t remote-test -v @remote_session)" = remote-test ] ||
 	exit 1
-[ "$($TMUX show-options -p -t remote-test:0.0 -v remain-on-exit)" = on ] ||
+[ "$($TMUX show-options -p -t remote-test:0.0 -v remain-on-exit)" = off ] ||
 	exit 1
 grep -F "new-session" "$FAKE_SSH_LOG" | grep -F "'-A'" |
 	grep -F "'-s' 'remote-test'" >/dev/null || exit 1
@@ -87,15 +87,16 @@ sleep 1
 grep -F -- '-i /tmp/fake-identity' "$FAKE_SSH_LOG" >/dev/null || exit 1
 $TMUX kill-session -t remote-key || exit 1
 
-# Exiting ssh leaves the local session and pane alive.
+# Exiting the SSH process kills its pane and, since it is the only pane,
+# the local session as well.
 pid=$($TMUX list-panes -t remote-test -F '#{pane_pid}') || exit 1
 kill "$pid" || exit 1
 sleep 1
-[ "$($TMUX list-panes -t remote-test -F '#{pane_dead}')" = 1 ] || exit 1
-[ "$($TMUX list-sessions -F '#{session_name}')" = remote-test ] || exit 1
+$TMUX has-session -t remote-test 2>/dev/null && exit 1
 
-# Invoking the command again reattaches the session and respawns the pane
-# without killing the persistent connection.
+# Invoking the command again creates a new local session and reuses the
+# persistent SSH connection rather than forcing a new one.
+: >"$FAKE_SSH_LOG"
 $TMUX new-remote-session -d -H example.test -s remote-test || exit 1
 sleep 1
 [ "$($TMUX list-panes -t remote-test -F '#{pane_dead}')" = 0 ] || exit 1
@@ -139,7 +140,7 @@ done
 [ "$($TMUX show-options -w -t inside-main:0 -v @remote_host)" = inside.test ] ||
 	exit 1
 [ "$($TMUX show-options -p -t "$(remote_pane | cut -d: -f1)" \
-    -v remain-on-exit)" = on ] || exit 1
+    -v remain-on-exit)" = off ] || exit 1
 
 # Output from the SSH pane is rendered by the modal pane, and input sent to
 # the modal pane reaches the SSH child.

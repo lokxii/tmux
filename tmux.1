@@ -1511,10 +1511,11 @@ The SSH connection uses a persistent
 .Xr ssh 1
 control master and server keepalives.
 Detaching the local client leaves the SSH connection running.
-Detaching the remote tmux client leaves the control master alive and the local
-session's pane is kept with
-.Ic remain\-on\-exit ;
-attaching again reuses the existing connection.
+Exiting the remote shell or detaching the remote tmux client closes the SSH
+connection and kills the SSH pane; if it was the last pane, the local window
+and session are destroyed normally.
+The control master remains alive, so a later invocation recreates the local
+pane and session while reusing the existing SSH connection.
 Before attaching to an existing live remote pane, an
 .Xr ssh 1
 liveness check runs with a five second timeout: it verifies the control

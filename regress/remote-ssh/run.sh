@@ -617,6 +617,11 @@ local_has_session()
 	tmux_main has-session -t "$1:" >/dev/null 2>&1
 }
 
+local_session_gone()
+{
+	! local_has_session "$1"
+}
+
 session_pane_id()
 {
 	tmux_main list-panes -t "$1:" -F '#{pane_id}' 2>/dev/null |
@@ -1421,16 +1426,11 @@ test_remote_detach()
 		return
 	fi
 
-	if wait_for 20 "local pane to exit after remote detach" \
-	    session_pane_dead "$MAIN"; then
-		pass "SSH pane exited after the remote tmux client detached"
+	if wait_for 20 "local session to disappear after remote detach" \
+	    local_session_gone "$MAIN"; then
+		pass "local session was destroyed with its last SSH pane"
 	else
-		fail "SSH pane did not exit after remote detach"
-	fi
-	if local_has_session "$MAIN"; then
-		pass "local session was kept by remain-on-exit"
-	else
-		fail "local session disappeared after remote detach"
+		fail "local session remained after its last SSH pane exited"
 	fi
 
 	if wait_for 12 "ControlMaster to persist after remote detach" \
@@ -1449,9 +1449,9 @@ test_remote_detach()
 		fail "could not reattach after remote detach"
 		return
 	fi
-	if ! wait_for 30 "local pane respawn after remote detach" \
+	if ! wait_for 30 "local session recreated after remote detach" \
 	    session_pane_live "$MAIN"; then
-		fail "pane was not respawned after remote detach"
+		fail "local session was not recreated after remote detach"
 		return
 	fi
 	if ! wait_for 20 "client attached after remote detach" \
@@ -1462,7 +1462,7 @@ test_remote_detach()
 
 	_rd_pid2=$(session_pane_pid "$MAIN")
 	_rd_ctl2=$(control_path_for_pane "$(session_pane_id "$MAIN")")
-	assert_ne "respawn used a new pane process" "$_rd_pid" "$_rd_pid2"
+	assert_ne "reattach used a new pane process" "$_rd_pid" "$_rd_pid2"
 	assert_eq "reattach used the same control path" "$_rd_ctl" "$_rd_ctl2"
 	if wait_for 20 "healthy control master after reattach" \
 	    ctl_check "$_rd_ctl"; then

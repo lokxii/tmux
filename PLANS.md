@@ -126,24 +126,24 @@ Behaviour:
 - **Local detach** only detaches the local client. The server keeps the SSH
   child and pane alive, and keeps parsing its output while unattached; the
   remote tmux client remains attached to its pty. Reattach is instant.
-- **Remote tmux detach** ends the remote tmux client, so the interactive SSH
-  process exits, but the `ControlMaster` transport stays alive. The local pane
-  is kept by `remain-on-exit` and the local session survives; a later attach
-  respawns the SSH client, reusing the persistent transport (no new TCP/auth
-  handshake).
+- **Remote tmux detach or remote shell exit** ends the remote tmux client, so
+  the interactive SSH process exits. The SSH pane is then killed normally; if
+  it was the last pane, the local session and window are destroyed with it
+  (standard tmux behavior). The `ControlMaster` transport stays alive, so a
+  later invocation recreates the local session/pane and reuses the persistent
+  transport (no new TCP/auth handshake).
 - **Attach to an existing remote session or modal pane:** if the local proxy
-  exists, run an attach-time liveness check and attach to it (respawning a dead
-  pane). If only the remote session exists, remote `new-session -A` attaches
-  to it.
+  still exists, run an attach-time liveness check and attach to it. If only the
+  remote session exists, remote `new-session -A` attaches to it.
 - **Hung SSH:** keepalives terminate a black-holed connection by themselves.
   In addition, attaching a live remote pane runs an asynchronous
   `ssh -O check` plus multiplexed round trip with a 5 second timeout; a failed or hung probe kills
   the old pane/control connection and re-establishes it automatically before
   attaching. `-R` does the same immediately, without waiting for the probe.
 
-The helper sets `remain-on-exit on` and `destroy-unattached off` on the remote
-session (via a completion callback after creation) so an SSH exit never
-silently destroys the local proxy session.
+The helper sets `remain-on-exit off` on the SSH pane (so an SSH exit kills the
+pane rather than leaving a dead one) and `destroy-unattached off` on the local
+session (so a local client detach does not reap it).
 
 ## Config and plugin inheritance
 
@@ -208,9 +208,10 @@ No changes to the pane, session, client or input/output core are needed.
   - host/port/session-name validation;
   - `@remote_*` metadata and `#{session_remote*}` formats;
   - `list-sessions` default line shows `[remote host:session]`;
-  - `remain-on-exit` keeps the proxy after the fake ssh exits;
-  - second invocation attaches the existing local session and respawns a dead
-    pane;
+  - `remain-on-exit` is off and the SSH pane plus its last-pane session are
+    killed when the fake ssh exits;
+  - a second invocation recreates the local session while reusing the SSH
+    control connection;
   - `-R` passes the force-reconnect path;
   - config/plugin copy invocation and `sh -n` syntax;
   - inside-tmux creation/reuse of the full-window modal pane and `pane_remote*`
@@ -232,5 +233,5 @@ No changes to the pane, session, client or input/output core are needed.
   gone until it is killed or the user logs out. `-R` and `ssh -O exit` can be
   used to clean it up; a future session-closed hook can automate this.
 - The remote host must have `tmux` and `sh`; missing binaries produce a normal
-  pane death with the SSH error visible (pane remains due to
-  `remain-on-exit`).
+  pane death with the SSH error visible. Because the pane is not kept after
+  exit, the local session disappears if it was the only pane.
