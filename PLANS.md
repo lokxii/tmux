@@ -148,6 +148,15 @@ so an SSH exit kills the pane, while users may set `on`, `key` or other values
 normally. It sets `destroy-unattached off` on the local session so a local
 client detach does not reap it.
 
+Control socket and remote cache names use a server-generated 96-bit random
+token rather than a hash of the public host/session names. A server-side
+registry maps each `(host, port, name)` to that token and to the session/pane
+ids created by this command. Pane reuse requires the registered pane id (or
+session id), the helper argv and the pane metadata to match, and modal reuse is
+limited to the invoking window; forged pane options alone cannot redirect a
+client to an attacker-chosen pane. The remote config rewrite also escapes
+`&`, `|` and `\` in the cache path before using it as a `sed` replacement.
+
 ## Config and plugin inheritance
 
 The SSH pane runs a small POSIX `sh` helper before `exec`ing the interactive

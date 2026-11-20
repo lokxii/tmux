@@ -79,6 +79,30 @@ $TMUX list-sessions | grep -F '[remote example.test:remote-test]' >/dev/null ||
 grep -F "new-session" "$FAKE_SSH_LOG" | grep -F "'-A'" |
 	grep -F "'-s' 'remote-test'" >/dev/null || exit 1
 
+# The control/cache token is random-looking, not a predictable hash, and is
+# different for different remote session names.
+token_for()
+{
+	$TMUX list-panes -t "$1" -F '#{pane_start_command}' 2>/dev/null |
+	    sed -n 's|.*tmux-remote-[0-9]*/\([0-9a-f][0-9a-f]*\)\.sock.*|\1|p' |
+	    head -1
+}
+token1=$(token_for remote-test)
+[ "${#token1}" -eq 24 ] || exit 1
+$TMUX new-remote-session -d -H example.test -s remote-token || exit 1
+sleep 1
+token2=$(token_for remote-token)
+[ -n "$token2" ] && [ "$token1" != "$token2" ] || exit 1
+$TMUX kill-session -t remote-token || exit 1
+
+# A local session that merely carries forged @remote_* options is not adopted.
+$TMUX new-session -d -s remote-forged 'exec sleep 100' || exit 1
+$TMUX set-option -t remote-forged @remote_host example.test || exit 1
+$TMUX set-option -t remote-forged @remote_session remote-forged || exit 1
+$TMUX new-remote-session -d -H example.test -s remote-forged \
+    >/dev/null 2>&1 && exit 1
+$TMUX kill-session -t remote-forged || exit 1
+
 # -i is passed to the SSH helper.
 : >"$FAKE_SSH_LOG"
 $TMUX new-remote-session -d -H example.test -s remote-key \

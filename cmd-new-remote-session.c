@@ -21,9 +21,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,11 +41,11 @@
  * control connection, copies the local tmux configuration and plugins to a
  * private directory on the remote, then execs the interactive SSH client.
  *
- * Arguments: host port control-path hash remote-command force
+ * Arguments: host port control-path token remote-command force key
  */
 static const char remote_helper[] =
 	"set -e\n"
-	"host=$1; port=$2; ctl=$3; hash=$4; cmd=$5; force=$6; key=$7\n"
+	"host=$1; port=$2; ctl=$3; token=$4; cmd=$5; force=$6; key=$7\n"
 	"mkdir -p \"${ctl%/*}\" 2>/dev/null || :\n"
 	"chmod 700 \"${ctl%/*}\" 2>/dev/null || :\n"
 	"set -- -o ControlMaster=auto -o ControlPath=\"$ctl\" "
@@ -65,8 +65,8 @@ static const char remote_helper[] =
 	"[ -d \"$HOME/.config/tmux\" ] && files=\"$files .config/tmux\"\n"
 	"if [ -n \"$files\" ] && command -v tar >/dev/null 2>&1; then\n"
 	"  tar -C \"$HOME\" -cf - $files 2>/dev/null | ssh \"$@\" \"$host\" "
-	"\"mkdir -p \\\"\\$HOME/.cache/tmux-remote/$hash\\\" && "
-	"tar -C \\\"\\$HOME/.cache/tmux-remote/$hash\\\" -xf -\" "
+	"\"mkdir -p \\\"\\$HOME/.cache/tmux-remote/$token\\\" && "
+	"tar -C \\\"\\$HOME/.cache/tmux-remote/$token\\\" -xf -\" "
 	"2>/dev/null || :\n"
 	"fi\n"
 	"exec ssh -tt \"$@\" \"$host\" \"$cmd\"\n";
@@ -76,18 +76,19 @@ static const char remote_helper[] =
  * any), rewrites local home references to the cache directory, and runs the
  * requested tmux new-session command with any remaining arguments.
  *
- * Arguments from sh(1): hash tmux-arguments...
+ * Arguments from sh(1): token tmux-arguments...
  */
 static const char remote_bootstrap[] =
-	"hash=$1\n"
+	"token=$1\n"
 	"shift\n"
-	"d=\"$HOME/.cache/tmux-remote/$hash\"\n"
+	"d=\"$HOME/.cache/tmux-remote/$token\"\n"
 	"c=\"$d/.tmux.conf\"\n"
 	"[ -f \"$c\" ] || c=\"$d/.config/tmux/tmux.conf\"\n"
+	"de=$(printf '%s' \"$d\" | sed 's/[\\\\&|]/\\\\&/g')\n"
 	"if [ -f \"$c\" ]; then\n"
-	"  sed -e 's|~/.tmux|'\"$d\"'/.tmux|g' "
-	"-e 's|\\$HOME/.tmux|'\"$d\"'/.tmux|g' "
-	"-e 's|~/.config/tmux|'\"$d\"'/.config/tmux|g' "
+	"  sed -e 's|~/.tmux|'\"$de\"'/.tmux|g' "
+	"-e 's|\\$HOME/.tmux|'\"$de\"'/.tmux|g' "
+	"-e 's|~/.config/tmux|'\"$de\"'/.config/tmux|g' "
 	"\"$c\" > \"$c.tmp\" && mv \"$c.tmp\" \"$c\"\n"
 	"  export TMUX_PLUGIN_MANAGER_PATH=\"$d/.tmux/plugins\"\n"
 	"  export TERM=xterm-256color\n"
@@ -96,11 +97,38 @@ static const char remote_bootstrap[] =
 	"export TERM=xterm-256color\n"
 	"exec tmux \"$@\"\n";
 
+/*
+ * Server-side registry for remote sessions. The random token is chosen by
+ * the server, not derived from user-controlled names, and the pane/session
+ * ids are recorded only after this command creates them. Pane options alone
+ * are not enough to reuse a pane.
+ */
+struct remote_pane_ref {
+	u_int			 pane_id;
+	u_int			 window_id;
+	TAILQ_ENTRY(remote_pane_ref) entry;
+};
+
+struct remote_entry {
+	char			*host;
+	char			*port;
+	char			*name;
+	char			*token;
+
+	u_int			 session_id;
+	TAILQ_HEAD(remote_pane_refs, remote_pane_ref) panes;
+
+	TAILQ_ENTRY(remote_entry) entry;
+};
+static TAILQ_HEAD(remote_entries, remote_entry) remote_entries =
+    TAILQ_HEAD_INITIALIZER(remote_entries);
+
 struct cmd_new_remote_session_data {
-	u_int	 window;
-	char	*host;
-	char	*name;
-	char	*port;
+	u_int			 window;
+	struct remote_entry	*entry;
+	char			*host;
+	char			*name;
+	char			*port;
 };
 
 struct cmd_new_remote_check_data {
@@ -174,34 +202,88 @@ remote_sh_quote(const char *s)
 	return (out);
 }
 
-/* A stable per-host/session identifier used for sockets and cache paths. */
-static char *
-remote_hash(const char *host, const char *port, const char *name)
+/* Generate a random token for control sockets and remote cache paths. */
+static int
+remote_random_token(char **out)
 {
-	uint64_t	 h = UINT64_C(1469598103934665603);
-	const char	*p;
-	char		*out;
+	static const char	 hexdigits[] = "0123456789abcdef";
+	unsigned char		 buf[12];
+	char			 hex[sizeof buf * 2 + 1];
+	int			 fd;
+	size_t			 off = 0, i;
+	ssize_t			 n;
 
-	for (p = host; *p != '\0'; p++) {
-		h ^= (unsigned char)*p;
-		h *= UINT64_C(1099511628211);
-	}
-	h ^= '|';
-	h *= UINT64_C(1099511628211);
-	if (port != NULL) {
-		for (p = port; *p != '\0'; p++) {
-			h ^= (unsigned char)*p;
-			h *= UINT64_C(1099511628211);
+	fd = open("/dev/urandom", O_RDONLY);
+	if (fd == -1)
+		return (-1);
+	while (off < sizeof buf) {
+		n = read(fd, buf + off, sizeof buf - off);
+		if (n == -1) {
+			if (errno == EINTR)
+				continue;
+			close(fd);
+			return (-1);
 		}
+		if (n == 0) {
+			close(fd);
+			errno = EIO;
+			return (-1);
+		}
+		off += (size_t)n;
 	}
-	h ^= '|';
-	h *= UINT64_C(1099511628211);
-	for (p = name; *p != '\0'; p++) {
-		h ^= (unsigned char)*p;
-		h *= UINT64_C(1099511628211);
+	close(fd);
+
+	for (i = 0; i < sizeof buf; i++) {
+		hex[i * 2] = hexdigits[buf[i] >> 4];
+		hex[i * 2 + 1] = hexdigits[buf[i] & 0xf];
 	}
-	xasprintf(&out, "%016llx", (unsigned long long)h);
-	return (out);
+	hex[sizeof hex - 1] = '\0';
+	*out = xstrdup(hex);
+	return (0);
+}
+
+/* Find the registry entry for a host, port and remote session name. */
+static struct remote_entry *
+remote_entry_find(const char *host, const char *port, const char *name)
+{
+	const char		*p = port == NULL ? "" : port;
+	struct remote_entry	*entry;
+
+	TAILQ_FOREACH(entry, &remote_entries, entry) {
+		if (strcmp(entry->host, host) != 0 ||
+		    strcmp(entry->port, p) != 0 ||
+		    strcmp(entry->name, name) != 0)
+			continue;
+		return (entry);
+	}
+	return (NULL);
+}
+
+/* Get or create the registry entry for a remote session. */
+static struct remote_entry *
+remote_entry_get(const char *host, const char *port, const char *name,
+    char **cause)
+{
+	struct remote_entry	*entry;
+	char			*token;
+
+	if ((entry = remote_entry_find(host, port, name)) != NULL)
+		return (entry);
+
+	if (remote_random_token(&token) != 0) {
+		xasprintf(cause, "cannot generate random token: %s",
+		    strerror(errno));
+		return (NULL);
+	}
+	entry = xcalloc(1, sizeof *entry);
+	entry->host = xstrdup(host);
+	entry->port = xstrdup(port == NULL ? "" : port);
+	entry->name = xstrdup(name);
+	entry->token = token;
+	entry->session_id = UINT_MAX;
+	TAILQ_INIT(&entry->panes);
+	TAILQ_INSERT_TAIL(&remote_entries, entry, entry);
+	return (entry);
 }
 
 /* Default local and remote session name derived from the host. */
@@ -296,15 +378,48 @@ remote_pane_matches(struct window_pane *wp, const char *host, const char *name)
 	return (match);
 }
 
-/* Find an existing remote modal pane. */
-static struct window_pane *
-remote_find_pane(const char *host, const char *name)
+/* Record a modal pane for an entry. */
+static void
+remote_modal_pane_add(struct remote_entry *entry, u_int pane_id,
+    u_int window_id)
 {
+	struct remote_pane_ref	*ref, *ref1;
+
+	TAILQ_FOREACH_SAFE(ref, &entry->panes, entry, ref1) {
+		if (ref->pane_id == pane_id || ref->window_id == window_id) {
+			TAILQ_REMOVE(&entry->panes, ref, entry);
+			free(ref);
+		}
+	}
+	ref = xcalloc(1, sizeof *ref);
+	ref->pane_id = pane_id;
+	ref->window_id = window_id;
+	TAILQ_INSERT_TAIL(&entry->panes, ref, entry);
+}
+
+/*
+ * Find the modal pane recorded for this remote entry in the current window.
+ * A pane with matching options in some other window is not reused: pane
+ * options are forgeable by any process in the same server, so reuse is tied
+ * to the server-side registry and the invoking window.
+ */
+static struct window_pane *
+remote_modal_pane(struct remote_entry *entry, u_int window_id)
+{
+	struct remote_pane_ref	*ref, *ref1;
 	struct window_pane	*wp;
 
-	RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
-		if (remote_pane_matches(wp, host, name))
-			return (wp);
+	TAILQ_FOREACH_SAFE(ref, &entry->panes, entry, ref1) {
+		if (ref->window_id != window_id)
+			continue;
+		wp = window_pane_find_by_id(ref->pane_id);
+		if (wp == NULL ||
+		    !remote_pane_matches(wp, entry->host, entry->name)) {
+			TAILQ_REMOVE(&entry->panes, ref, entry);
+			free(ref);
+			return (NULL);
+		}
+		return (wp);
 	}
 	return (NULL);
 }
@@ -374,7 +489,7 @@ remote_build_remote_argv(struct args *args, const char *name, int offset,
 
 /* Build the complete command string sent to the remote shell. */
 static char *
-remote_build_command(const char *hash, int argc, char **argv)
+remote_build_command(const char *token, int argc, char **argv)
 {
 	char	*out = NULL, *quoted;
 	size_t	 len = 0;
@@ -385,7 +500,7 @@ remote_build_command(const char *hash, int argc, char **argv)
 	remote_cat(&out, &len, quoted);
 	free(quoted);
 	remote_cat(&out, &len, " sh ");
-	quoted = remote_sh_quote(hash);
+	quoted = remote_sh_quote(token);
 	remote_cat(&out, &len, quoted);
 	free(quoted);
 	for (i = 0; i < argc; i++) {
@@ -400,7 +515,7 @@ remote_build_command(const char *hash, int argc, char **argv)
 /* Build the local argv which runs the helper in the pane. */
 static char **
 remote_build_helper_argv(const char *host, const char *port, const char *ctl,
-    const char *hash, const char *command, int force, const char *key,
+    const char *token, const char *command, int force, const char *key,
     int *argc)
 {
 	char	**argv = NULL;
@@ -413,7 +528,7 @@ remote_build_helper_argv(const char *host, const char *port, const char *ctl,
 	cmd_append_argv(argc, &argv, host);
 	cmd_append_argv(argc, &argv, port == NULL ? "" : port);
 	cmd_append_argv(argc, &argv, ctl);
-	cmd_append_argv(argc, &argv, hash);
+	cmd_append_argv(argc, &argv, token);
 	cmd_append_argv(argc, &argv, command);
 	cmd_append_argv(argc, &argv, force ? "1" : "0");
 	cmd_append_argv(argc, &argv, key == NULL ? "" : key);
@@ -531,16 +646,17 @@ remote_build_show(struct window_pane *wp, struct session *current)
 }
 
 /* Mark a pane as handling a remote session. */
-static void
+static int
 remote_mark_pane(struct window_pane *wp, struct cmd_new_remote_session_data *d)
 {
 	if (!remote_pane_is_helper(wp))
-		return;
+		return (0);
 	options_set_string(wp->options, "@remote_host", 0, "%s", d->host);
 	options_set_string(wp->options, "@remote_session", 0, "%s", d->name);
 	if (d->port != NULL)
 		options_set_string(wp->options, "@remote_port", 0, "%s",
 		    d->port);
+	return (1);
 }
 
 /* Set the metadata and lifetime options once the new session exists. */
@@ -559,8 +675,8 @@ cmd_new_remote_session_done(__unused struct cmdq_item *item, void *data)
 			wp = w->modal;
 			if (wp == NULL)
 				wp = w->active;
-			if (wp != NULL)
-				remote_mark_pane(wp, d);
+			if (wp != NULL && remote_mark_pane(wp, d))
+				remote_modal_pane_add(d->entry, wp->id, w->id);
 			options_set_string(w->options, "@remote_host", 0, "%s",
 			    d->host);
 			options_set_string(w->options, "@remote_session", 0,
@@ -578,8 +694,10 @@ cmd_new_remote_session_done(__unused struct cmdq_item *item, void *data)
 				    0, "%s", d->port);
 			options_set_number(s->options, "destroy-unattached", 0);
 			wl = s->curw;
-			if (wl != NULL && (wp = wl->window->active) != NULL)
-				remote_mark_pane(wp, d);
+			if (wl != NULL && (wp = wl->window->active) != NULL) {
+				if (remote_mark_pane(wp, d))
+					d->entry->session_id = s->id;
+			}
 		}
 	}
 
@@ -695,10 +813,12 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct winlink			*wl;
 	struct window_pane		*wp, *mwp;
 	struct environ_entry		*ee;
+	struct remote_entry		*entry;
 	struct cmd_new_remote_session_data *data;
 	const char			*value, *errstr;
 	char				*host = NULL, *port = NULL, *key = NULL;
-	char				*ename, *name = NULL, *hash = NULL;
+	char				*ename, *name = NULL, *token = NULL;
+	char				*cause = NULL;
 	char				*ctl = NULL;
 	const char			*runtime;
 	char				*remote = NULL, *ssh = NULL;
@@ -712,6 +832,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	int				 fargc = 0;
 	int				 offset = 0, inside = 0, force, detached;
 	int				 dead = 0;
+	long long			 portnum;
 	enum cmd_retval			 retval = CMD_RETURN_NORMAL;
 
 	force = args_has(args, 'R');
@@ -736,11 +857,13 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		offset++;
 	if ((value = args_get(args, 'p')) != NULL) {
 		port = format_single(item, value, c, NULL, NULL, NULL);
-		(void)strtonum(port, 1, 65535, &errstr);
+		portnum = strtonum(port, 1, 65535, &errstr);
 		if (errstr != NULL) {
 			cmdq_error(item, "port %s", errstr);
 			goto fail;
 		}
+		free(port);
+		xasprintf(&port, "%lld", portnum);
 	}
 	if ((value = args_get(args, 'i')) != NULL) {
 		key = format_single(item, value, c, NULL, NULL, NULL);
@@ -780,17 +903,23 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		free(tmp);
 	}
 
-	hash = remote_hash(host, port, name);
+	entry = remote_entry_get(host, port, name, &cause);
+	if (entry == NULL) {
+		cmdq_error(item, "%s", cause);
+		free(cause);
+		goto fail;
+	}
+	token = entry->token;
 	runtime = getenv("XDG_RUNTIME_DIR");
 	if (runtime == NULL || *runtime == '\0')
 		runtime = "/tmp";
 	xasprintf(&ctl, "%s/tmux-remote-%u/%s.sock", runtime,
-	    (u_int)getuid(), hash);
+	    (u_int)getuid(), token);
 
 	remote_build_remote_argv(args, name, offset, argc, argv, &rargc,
 	    &rargv);
-	remote = remote_build_command(hash, rargc, rargv);
-	hargv = remote_build_helper_argv(host, port, ctl, hash, remote, force,
+	remote = remote_build_command(token, rargc, rargv);
+	hargv = remote_build_helper_argv(host, port, ctl, token, remote, force,
 	    key, &hargc);
 
 	/*
@@ -798,14 +927,14 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	 * modal pane in the invoking window rather than switching sessions.
 	 * Reuse an existing remote modal pane when there is one.
 	 */
-	if (inside && !detached) {
-		mwp = remote_find_pane(host, name);
+	if (inside && !detached && wp != NULL && wp->window != NULL) {
+		mwp = remote_modal_pane(entry, wp->window->id);
 		if (mwp != NULL) {
 			dead = window_pane_exited(mwp);
 			show = remote_build_show(mwp, fs.s);
 			if (!force && !dead) {
 				fargv = remote_build_helper_argv(host, port,
-				    ctl, hash, remote, 1, key, &fargc);
+				    ctl, token, remote, 1, key, &fargc);
 				respawn = remote_build_respawn(mwp, fargc,
 				    fargv);
 				if (remote_start_check(item, fs.s, host, ctl,
@@ -849,6 +978,11 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		}
 		free(rhost);
 		rhost = NULL;
+		if (entry->session_id != s->id) {
+			cmdq_error(item, "session %s is not owned by this "
+			    "remote connection", name);
+			goto fail;
+		}
 		options_set_string(s->options, "@remote_session", 0, "%s",
 		    name);
 		if (port != NULL)
@@ -873,7 +1007,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		if (!detached)
 			show = remote_build_attach(name, args, inside);
 		if (!detached && !force && !dead) {
-			fargv = remote_build_helper_argv(host, port, ctl, hash,
+			fargv = remote_build_helper_argv(host, port, ctl, token,
 			    remote, 1, key, &fargc);
 			respawn = remote_build_respawn(wp, fargc, fargv);
 			if (remote_start_check(item, s, host, ctl, respawn,
@@ -930,6 +1064,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 
 		data = xcalloc(1, sizeof *data);
 		data->window = wp->window->id;
+		data->entry = entry;
 		data->host = xstrdup(host);
 		data->name = xstrdup(name);
 		if (port != NULL)
@@ -962,6 +1097,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 
 	data = xcalloc(1, sizeof *data);
 	data->window = UINT_MAX;
+	data->entry = entry;
 	data->host = xstrdup(host);
 	data->name = xstrdup(name);
 	if (port != NULL)
@@ -974,7 +1110,6 @@ done:
 	free(port);
 	free(key);
 	free(name);
-	free(hash);
 	free(ctl);
 	free(remote);
 	free(ssh);
@@ -994,7 +1129,6 @@ fail:
 	free(port);
 	free(key);
 	free(name);
-	free(hash);
 	free(ctl);
 	free(remote);
 	free(ssh);
