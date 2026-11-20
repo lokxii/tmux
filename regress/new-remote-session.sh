@@ -74,7 +74,7 @@ $TMUX list-sessions | grep -F '[remote example.test:remote-test]' >/dev/null ||
 	exit 1
 [ "$($TMUX show-options -t remote-test -v @remote_session)" = remote-test ] ||
 	exit 1
-[ "$($TMUX show-options -p -t remote-test:0.0 -v remain-on-exit)" = off ] ||
+[ "$($TMUX show-options -p -A -t remote-test:0.0 -v remain-on-exit)" = off ] ||
 	exit 1
 grep -F "new-session" "$FAKE_SSH_LOG" | grep -F "'-A'" |
 	grep -F "'-s' 'remote-test'" >/dev/null || exit 1
@@ -87,8 +87,22 @@ sleep 1
 grep -F -- '-i /tmp/fake-identity' "$FAKE_SSH_LOG" >/dev/null || exit 1
 $TMUX kill-session -t remote-key || exit 1
 
-# Exiting the SSH process kills its pane and, since it is the only pane,
-# the local session as well.
+# remain-on-exit defaults off but is not forced: enabling it on the SSH pane
+# keeps the pane and session after SSH exits.
+$TMUX new-remote-session -d -H example.test -s remote-keep || exit 1
+sleep 1
+[ "$($TMUX show-options -p -A -t remote-keep:0.0 -v remain-on-exit)" = off ] ||
+	exit 1
+$TMUX set-option -p -t remote-keep:0.0 remain-on-exit on || exit 1
+pid=$($TMUX list-panes -t remote-keep -F '#{pane_pid}') || exit 1
+kill "$pid" || exit 1
+sleep 1
+[ "$($TMUX list-panes -t remote-keep -F '#{pane_dead}')" = 1 ] || exit 1
+$TMUX has-session -t remote-keep || exit 1
+$TMUX kill-session -t remote-keep || exit 1
+
+# With the default remain-on-exit off, exiting the SSH process kills its pane
+# and, since it is the only pane, the local session as well.
 pid=$($TMUX list-panes -t remote-test -F '#{pane_pid}') || exit 1
 kill "$pid" || exit 1
 sleep 1
@@ -139,7 +153,7 @@ done
 [ "$($TMUX list-clients -F '#{client_session}')" = inside-main ] || exit 1
 [ "$($TMUX show-options -w -t inside-main:0 -v @remote_host)" = inside.test ] ||
 	exit 1
-[ "$($TMUX show-options -p -t "$(remote_pane | cut -d: -f1)" \
+[ "$($TMUX show-options -p -A -t "$(remote_pane | cut -d: -f1)" \
     -v remain-on-exit)" = off ] || exit 1
 
 # Output from the SSH pane is rendered by the modal pane, and input sent to

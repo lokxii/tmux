@@ -128,10 +128,10 @@ No root is required on either side.
    session and SSH pane pid survive, the control master remains healthy, and a
    new client can reattach without respawning the pane.
 9. **Remote detach and ControlMaster** — runs `tmux detach-client` on the remote
-   (independent of the remote prefix binding), verifies the local SSH pane
-   exits and its single-pane local session is destroyed, verifies the
-   persistent control master survives, then reattaches and verifies the same
-   control path and socket inode are reused.
+   (independent of the remote prefix binding), with `remain-on-exit` forced off
+   for this check, verifies the local SSH pane exits and its single-pane local
+   session is destroyed, verifies the persistent control master survives, then
+   reattaches and verifies the same control path and socket inode are reused.
 10. **Hung SSH reconnect** — locates the local persistent mux master and its
     interactive SSH client for the test control path, `SIGSTOP`s both, runs the
     attach command again, and verifies the attach-time liveness path respawns

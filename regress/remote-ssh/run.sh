@@ -1407,6 +1407,10 @@ test_remote_detach()
 
 	_rd_pid=$(session_pane_pid "$MAIN")
 	_rd_id=$(session_pane_id "$MAIN")
+	# remain-on-exit is configurable; force it off here so this test checks
+	# the default last-pane/session destruction deterministically.
+	tmux_main set-option -p -t "$_rd_id" remain-on-exit off \
+	    >/dev/null 2>&1 || :
 	_rd_ctl=$(control_path_for_pane "$_rd_id")
 	if [ -z "$_rd_ctl" ]; then
 		skip "could not locate the control path for the remote detach test"

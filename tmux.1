@@ -1512,8 +1512,20 @@ The SSH connection uses a persistent
 control master and server keepalives.
 Detaching the local client leaves the SSH connection running.
 Exiting the remote shell or detaching the remote tmux client closes the SSH
-connection and kills the SSH pane; if it was the last pane, the local window
-and session are destroyed normally.
+connection.
+With the default
+.Ic remain\-on\-exit
+value of
+.Ql off ,
+the SSH pane is killed and, if it was the last pane, the local window and
+session are destroyed normally.
+This command does not override
+.Ic remain\-on\-exit ,
+so setting it to
+.Ql on ,
+.Ql key
+or another choice keeps the dead pane and session according to the normal tmux
+rules.
 The control master remains alive, so a later invocation recreates the local
 pane and session while reusing the existing SSH connection.
 Before attaching to an existing live remote pane, an

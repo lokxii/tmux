@@ -127,9 +127,11 @@ Behaviour:
   child and pane alive, and keeps parsing its output while unattached; the
   remote tmux client remains attached to its pty. Reattach is instant.
 - **Remote tmux detach or remote shell exit** ends the remote tmux client, so
-  the interactive SSH process exits. The SSH pane is then killed normally; if
-  it was the last pane, the local session and window are destroyed with it
-  (standard tmux behavior). The `ControlMaster` transport stays alive, so a
+  the interactive SSH process exits. With the default `remain-on-exit off` the
+  SSH pane is killed normally; if it was the last pane, the local session and
+  window are destroyed with it (standard tmux behavior). If `remain-on-exit`
+  is configured on, the dead pane and session are kept normally. The
+  `ControlMaster` transport stays alive, so a
   later invocation recreates the local session/pane and reuses the persistent
   transport (no new TCP/auth handshake).
 - **Attach to an existing remote session or modal pane:** if the local proxy
@@ -141,9 +143,10 @@ Behaviour:
   the old pane/control connection and re-establishes it automatically before
   attaching. `-R` does the same immediately, without waiting for the probe.
 
-The helper sets `remain-on-exit off` on the SSH pane (so an SSH exit kills the
-pane rather than leaving a dead one) and `destroy-unattached off` on the local
-session (so a local client detach does not reap it).
+The helper does not override `remain-on-exit`; its standard default is `off`,
+so an SSH exit kills the pane, while users may set `on`, `key` or other values
+normally. It sets `destroy-unattached off` on the local session so a local
+client detach does not reap it.
 
 ## Config and plugin inheritance
 
@@ -208,8 +211,9 @@ No changes to the pane, session, client or input/output core are needed.
   - host/port/session-name validation;
   - `@remote_*` metadata and `#{session_remote*}` formats;
   - `list-sessions` default line shows `[remote host:session]`;
-  - `remain-on-exit` is off and the SSH pane plus its last-pane session are
-    killed when the fake ssh exits;
+  - `remain-on-exit` defaults off (not forced) and the SSH pane plus its
+    last-pane session are killed when the fake ssh exits; enabling
+    `remain-on-exit` keeps the pane and session;
   - a second invocation recreates the local session while reusing the SSH
     control connection;
   - `-R` passes the force-reconnect path;
