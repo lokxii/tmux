@@ -95,7 +95,7 @@ Test inventory:
   8. local detach survival: the SSH pane stays alive and can be reattached
   9. remote detach: the ControlMaster survives and is reused
  10. hung SSH reconnect: SIGSTOP the local master, then attach again
- 11. inside-tmux full-window modal pane creation, I/O and reuse
+ 11. inside-tmux proxy session creation, status/prefix routing, I/O and reuse
 EOF
 }
 
@@ -817,33 +817,8 @@ send_inside_rerun()
 	tmux_main send-keys -t "$_ssr_session:0.0" "$_ssr_cmd" Enter
 }
 
-modal_line()
-{
-	_ml_session=$1
-	_ml_host=$2
-	_ml_remote=$3
-	tmux_main list-panes -t "$_ml_session:" -F \
-	    '#{pane_id}|#{pane_remote}|#{pane_remote_host}|#{pane_remote_session}|#{pane_pid}|#{pane_width}|#{pane_height}|#{pane_modal_flag}' \
-	    2>/dev/null |
-	    awk -F'|' -v h="$_ml_host" -v s="$_ml_remote" \
-	    '$2 == h && $4 == s { print; exit }'
-}
 
-modal_count()
-{
-	_mc_session=$1
-	_mc_host=$2
-	_mc_remote=$3
-	tmux_main list-panes -t "$_mc_session:" -F \
-	    '#{pane_remote}|#{pane_remote_session}' 2>/dev/null |
-	    awk -F'|' -v h="$_mc_host" -v s="$_mc_remote" \
-	    '$1 == h && $2 == s { c++ } END { print c + 0 }'
-}
 
-modal_field()
-{
-	printf '%s\n' "$1" | awk -F'|' -v n="$2" '{ print $n }'
-}
 
 # Continue any SSH master stopped by the hung-connection test.  Called both on
 # the success path and from cleanup.
@@ -1598,7 +1573,7 @@ test_hung()
 
 test_modal()
 {
-	section "11. Inside-tmux full-window modal pane"
+	section "11. Inside-tmux proxy session and key routing"
 	if remote_has_session "$MODAL"; then
 		fail "remote session $MODAL already exists"
 		return
@@ -1626,76 +1601,50 @@ test_modal()
 		fail "could not send the inside-tmux command"
 		return
 	}
-	if ! wait_for 60 "modal pane" \
-	    modal_count_is "$MODAL_SESSION" "$REMOTE_HOST" "$MODAL" 1; then
-		fail "modal pane was not created"
+	if ! wait_for 60 "local proxy session" local_has_session "$MODAL"; then
+		fail "local proxy session was not created"
 		dump_outer
-		printf 'INFO: inner session panes:\n' >&2
-		tmux_main list-panes -t "$MODAL_SESSION:" -F \
-		    '#{pane_id}|#{pane_remote}|#{pane_remote_session}|#{pane_modal_flag}' \
-		    2>/dev/null >&2 || :
 		return
 	fi
-	pass "exactly one remote modal pane was created"
-
-	_mo_line=$(modal_line "$MODAL_SESSION" "$REMOTE_HOST" "$MODAL")
-	_mo_id=$(modal_field "$_mo_line" 1)
-	_mo_host=$(modal_field "$_mo_line" 2)
-	_mo_rhost=$(modal_field "$_mo_line" 3)
-	_mo_rsession=$(modal_field "$_mo_line" 4)
-	_mo_pid=$(modal_field "$_mo_line" 5)
-	_mo_w=$(modal_field "$_mo_line" 6)
-	_mo_h=$(modal_field "$_mo_line" 7)
-	_mo_flag=$(modal_field "$_mo_line" 8)
-
-	assert_eq "modal pane_remote" "$REMOTE_HOST" "$_mo_host"
-	assert_eq "modal pane_remote_host" "$REMOTE_HOST" "$_mo_rhost"
-	assert_eq "modal pane_remote_session" "$MODAL" "$_mo_rsession"
-	assert_eq "modal pane is flagged as modal" "1" "$_mo_flag"
-	assert_eq "window_modal_pane matches" "$_mo_id" \
-	    "$(pane_value "$MODAL_SESSION:0" '#{window_modal_pane}')"
-
-	if client_at_least "$MODAL_SESSION" 1 &&
-	    ! local_has_session "$MODAL"; then
-		pass "client stayed on its original session"
-	else
-		fail "client did not stay on its original session"
+	if ! wait_for 20 "client switched to proxy session" \
+	    client_at_least "$MODAL" 1; then
+		fail "client did not switch to the proxy session"
 	fi
+	pass "client switched to the dedicated proxy session"
 
-	_mo_ww=$(pane_value "$MODAL_SESSION:0" '#{window_width}')
-	_mo_wh=$(pane_value "$MODAL_SESSION:0" '#{window_height}')
-	case $_mo_ww:$_mo_wh:$_mo_w:$_mo_h in
-	''|*[!0-9:]*)
-		fail "modal size is not numeric"
-		;;
-	*)
-		_mo_dw=$((_mo_ww - _mo_w))
-		_mo_dh=$((_mo_wh - _mo_h))
-		if [ "$_mo_dw" -ge 0 ] && [ "$_mo_dw" -le 4 ] &&
-		    [ "$_mo_dh" -ge 0 ] && [ "$_mo_dh" -le 4 ]; then
-			pass "modal pane covers the window (${_mo_w}x${_mo_h} of ${_mo_ww}x${_mo_wh})"
-		else
-			fail "modal pane size is not full-window (${_mo_w}x${_mo_h} of ${_mo_ww}x${_mo_wh})"
-		fi
-		;;
-	esac
+	assert_eq "proxy session has remote metadata" "$REMOTE_HOST" \
+	    "$(tmux_main show-options -t "$MODAL:" -v @remote_host 2>/dev/null)"
+	assert_eq "proxy session local status is off" off \
+	    "$(tmux_main show-options -t "$MODAL:" -v status 2>/dev/null)"
+	assert_eq "proxy session local prefix is disabled" None \
+	    "$(tmux_main show-options -t "$MODAL:" -v prefix 2>/dev/null)"
+	tmux_main list-keys -T tmux-remote-host 2>/dev/null |
+	    grep -Fq 'new-session' || fail "host key table has no new-session binding"
+	tmux_main list-keys -T root C-g >/dev/null 2>&1 ||
+	    fail "host escape C-g is not bound"
 
-	_mo_tag="RMODAL_${SUFFIX}_"
+	_mo_id=$(session_pane_id "$MODAL")
+	_mo_pid=$(session_pane_pid "$MODAL")
+	[ -n "$_mo_id" ] || {
+		fail "could not find the proxy pane"
+		return
+	}
+
+	_mo_tag="RPROXY_${SUFFIX}_"
 	if send_and_wait_roundtrip "$_mo_id" "$_mo_tag"; then
-		pass "modal pane input/output round trip succeeded"
+		pass "proxy pane input/output round trip succeeded"
 	else
-		fail "modal pane input/output round trip failed"
+		fail "proxy pane input/output round trip failed"
 	fi
 
-	if wait_for 30 "remote modal session" remote_has_session "$MODAL"; then
-		pass "remote modal session exists"
+	if wait_for 30 "remote session" remote_has_session "$MODAL"; then
+		pass "remote session exists"
 	else
-		fail "remote modal session is missing"
+		fail "remote session is missing"
 	fi
 
 	# Run the command a second time from the original pane.  The trailing
-	# printf proves the second command completed; its output is not present
-	# in the typed command line.
+	# printf proves the second command completed.
 	send_inside_rerun "$MODAL_SESSION" || {
 		fail "could not send the second inside-tmux command"
 		return
@@ -1708,25 +1657,17 @@ test_modal()
 	fi
 	pass "second inside-tmux invocation completed"
 
-	assert_eq "second invocation reused the modal pane id" \
-	    "$_mo_id" \
-	    "$(modal_field "$(modal_line "$MODAL_SESSION" "$REMOTE_HOST" "$MODAL")" 1)"
-	assert_eq "second invocation reused the SSH pane pid" \
-	    "$_mo_pid" \
-	    "$(modal_field "$(modal_line "$MODAL_SESSION" "$REMOTE_HOST" "$MODAL")" 5)"
-	assert_eq "second invocation did not create another modal pane" "1" \
-	    "$(modal_count "$MODAL_SESSION" "$REMOTE_HOST" "$MODAL")"
-	if client_at_least "$MODAL_SESSION" 1; then
-		pass "client is still on its original session after reuse"
+	assert_eq "second invocation reused the proxy pane id" "$_mo_id" \
+	    "$(session_pane_id "$MODAL")"
+	assert_eq "second invocation reused the SSH pane pid" "$_mo_pid" \
+	    "$(session_pane_pid "$MODAL")"
+	if client_at_least "$MODAL" 1; then
+		pass "client is on the proxy session after reuse"
 	else
-		fail "client left its original session after reuse"
+		fail "client left the proxy session after reuse"
 	fi
 }
 
-modal_count_is()
-{
-	[ "$(modal_count "$1" "$2" "$3")" -eq "$4" ]
-}
 
 resolve_tmux_bin()
 {

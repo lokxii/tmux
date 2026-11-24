@@ -1494,18 +1494,57 @@ the interactive remote session.
 .Pp
 Outside tmux the new session is attached to the current terminal, so SSH input
 and output use the terminal's stdin and stdout.
-When run from a pane inside tmux, the SSH client is instead hosted in a
-full-window modal floating pane in the invoking window, so the remote session
-expands over the client area above the status line and the client stays on its
-original session.
-The modal pane is reused by a later invocation and its identity is available
-as
+When run from a pane inside tmux, a dedicated local proxy session is created
+and the invoking client switches to it, so the remote session fills the client
+and the client's original session is left untouched.
+The proxy session is reused by a later invocation and its identity is
+available as
 .Ql #{pane_remote} ,
 .Ql #{pane_remote_host}
 and
 .Ql #{pane_remote_session} .
 .Fl d
-creates a detached local session instead of a modal pane.
+creates a detached local session without switching to it.
+.Pp
+The local proxy session is configured so there is only one tmux status line:
+its own
+.Ic status
+is off and the remote tmux status line is used.
+Its
+.Ic prefix
+and
+.Ic prefix2
+are disabled, so the remote tmux receives its own prefix and handles remote
+commands such as
+.Ic new\-window ,
+.Ic split\-window
+and the remote command prompt.
+The
+.Ql C\-g
+key is installed as the host escape: it enters the
+.Ql tmux\-remote\-host
+key table for local commands.
+By default
+.Ql c
+runs
+.Ic new\-session ,
+.Ql d
+runs
+.Ic detach\-client ,
+.Ql s
+runs a local
+.Ic choose\-tree ,
+.Ql :
+opens a local command prompt,
+.Ql ?
+lists the host keys, and
+.Ql L ,
+.Ql n
+and
+.Ql p
+switch local sessions.
+Run a command with the prefix of the tmux layer that should execute it, or use
+the corresponding command prompt.
 .Pp
 The SSH connection uses a persistent
 .Xr ssh 1

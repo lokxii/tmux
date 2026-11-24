@@ -138,11 +138,12 @@ No root is required on either side.
     the pane with a new pid, the old connection ends, the new connection is
     healthy, and a round trip works. This is a best-effort real-world
     simulation; see limitations.
-11. **Inside-tmux modal pane** — attaches a pty client to an inner session, runs
-    `new-remote-session` from that session's shell, and verifies the client
-    stays on the original session, exactly one full-window modal pane exists
-    with `#{pane_remote}`, its size is plausible, I/O works through it, and a
-    second invocation completes and reuses the same pane id and pid.
+11. **Inside-tmux proxy session and key routing** — attaches a pty client to an
+    inner session, runs `new-remote-session` from that session's shell, and
+    verifies the client switches to a dedicated local proxy session, the local
+    status and prefix are disabled, the remote tmux is the sole status bar,
+    the `C-g` host escape and host key table are installed, I/O works through
+    the proxy pane, and a second invocation reuses the same pane id and pid.
 
 ## Safety and cleanup
 
@@ -169,8 +170,8 @@ No root is required on either side.
   sessions are later killed. If you want complete isolation, run the tests on a
   remote account/host with no active tmux server.
 - The harness unsets `TMUX` and `TMUX_PANE` in its own environment, so it can be
-  started from inside a user's tmux session without creating modal panes in
-  that session.
+  started from inside a user's tmux session without switching that session's
+  client.
 
 ## Known limitations
 

@@ -8,10 +8,10 @@ keeping tmux's normal pty, resize, input, output, detach and redraw semantics.
 
 ## Summary of the chosen design
 
-A remote session is a normal local tmux session (or, when invoked from inside
-tmux, a full-size modal pane in the invoking window) whose pane runs an SSH
-client. SSH allocates a remote pty and starts a remote tmux client
-(`tmux new-session -A ...`) inside it.
+A remote session is a normal local tmux session whose pane runs an SSH client.
+When invoked from inside tmux, a dedicated local proxy session is created and
+the client switches to it. SSH allocates a remote pty and starts a remote tmux
+client (`tmux new-session -A ...`) inside it.
 
 This deliberately reuses the existing pane process path:
 
@@ -73,14 +73,26 @@ new-remote-session [-AdDEPRX] [-c start-directory] [-e environment]
   client. Input comes from the client's stdin; output goes to its stdout. This
   is the standard tmux client path.
 - **Inside another tmux session:** the enclosing pane/server is detected via
-  `TMUX`/`TMUX_PANE`. The SSH client is hosted in a full-window **modal
-  floating pane** in the invoking window (`new-pane -O -x 100% -y 100%`), so
-  input and output are forwarded by the normal pane path and the UI expands
-  over the client area above the status line. The client stays on its original
-  session; the remote metadata is stored on the modal pane and its window and
-  is exposed as `#{pane_remote*}`. Re-running the command reuses the existing
-  modal pane instead of creating another one. `-d` keeps the previous
-  session-only behaviour and creates a detached local session.
+  `TMUX`/`TMUX_PANE`. A dedicated local proxy session is created detached and
+  the invoking client switches to it, so the remote session fills the client
+  and there is no second local status bar. Re-running the command attaches or
+  switches to that same proxy session instead of creating another one. `-d`
+  creates the detached session without switching.
+
+The local proxy session is configured for transparent key routing:
+
+- local `status` is off, so the remote tmux status line is the only one;
+- local `prefix` and `prefix2` are disabled, so the remote tmux receives its
+  own prefix (normally `C-b`);
+- a root binding for `C-g` enters the `tmux-remote-host` key table, which
+  provides host-side commands (`c` new-session, `d` detach-client, `s`
+  choose-tree for local sessions, `:` local command prompt via
+  `command-prompt -P`, `?` local keys, `L`/`n`/`p` local session switching).
+
+Thus remote commands (`new-window`, splits, select/kill/resize/swap/copy-mode,
+remote command prompt, and so on) use the remote prefix, while local proxy
+management (`new-session`, detach, local command prompt, local sessions) uses
+`C-g`. The full command classification is in `REMOTE-COMMANDS.md`.
 
 If a local session with the same name already exists and belongs to the same
 remote host, the command attaches to it instead of creating a duplicate. If
@@ -104,7 +116,7 @@ New formats (added in the sorted `format_table` in `format.c`):
 - `#{session_remote_host}` — alias for the host.
 - `#{session_remote_session}` — remote session name.
 - `#{pane_remote}`, `#{pane_remote_host}`, `#{pane_remote_session}` — the same
-  identity for modal panes created when the command is run inside tmux.
+  identity for the local proxy pane.
 
 `list-sessions`' default template gains
 `[remote <host>:<session>]` when `@remote_host` is set, satisfying the
@@ -134,8 +146,8 @@ Behaviour:
   `ControlMaster` transport stays alive, so a
   later invocation recreates the local session/pane and reuses the persistent
   transport (no new TCP/auth handshake).
-- **Attach to an existing remote session or modal pane:** if the local proxy
-  still exists, run an attach-time liveness check and attach to it. If only the
+- **Attach to an existing remote session:** if the local proxy session still
+  exists, run an attach-time liveness check and attach to it. If only the
   remote session exists, remote `new-session -A` attaches to it.
 - **Hung SSH:** keepalives terminate a black-holed connection by themselves.
   In addition, attaching a live remote pane runs an asynchronous
@@ -150,12 +162,12 @@ client detach does not reap it.
 
 Control socket and remote cache names use a server-generated 96-bit random
 token rather than a hash of the public host/session names. A server-side
-registry maps each `(host, port, name)` to that token and to the session/pane
-ids created by this command. Pane reuse requires the registered pane id (or
-session id), the helper argv and the pane metadata to match, and modal reuse is
-limited to the invoking window; forged pane options alone cannot redirect a
-client to an attacker-chosen pane. The remote config rewrite also escapes
-`&`, `|` and `\` in the cache path before using it as a `sed` replacement.
+registry maps each `(host, port, name)` to that token and to the session id
+created by this command. Session reuse requires the registered session id, the
+helper argv and the pane metadata to match; forged pane options alone cannot
+redirect a client to an attacker-chosen pane. The remote config rewrite also
+escapes `&`, `|` and `\` in the cache path before using it as a `sed`
+replacement.
 
 ## Config and plugin inheritance
 
@@ -202,8 +214,8 @@ No changes to the pane, session, client or input/output core are needed.
    validation (`host` cannot start with `-`, numeric port, safe session name).
 3. Implement the local helper script (ControlMaster, keepalive, config/plugin
    sync, remote config rewrite, `exec ssh`).
-4. Implement queued creation (`new-session`/`new-pane -O`/attach), the
-   inside-tmux modal presentation, duplicate/attach handling, and respawn on
+4. Implement queued creation (`new-session`/attach), the inside-tmux proxy
+   session and key/status routing, duplicate/attach handling, and respawn on
    dead pane/`-R`.
 5. Add completion callbacks for `remain-on-exit`, `destroy-unattached` and
    `@remote_*` metadata.
@@ -227,9 +239,9 @@ No changes to the pane, session, client or input/output core are needed.
     control connection;
   - `-R` passes the force-reconnect path;
   - config/plugin copy invocation and `sh -n` syntax;
-  - inside-tmux creation/reuse of the full-window modal pane and `pane_remote*`
-    metadata, driven through a second tmux server acting as the attached pty
-    client;
+  - inside-tmux creation/reuse of the dedicated proxy session, disabled local
+    status/prefix and the `C-g` host key table, driven through a second tmux
+    server acting as the attached pty client;
   - a hung `ssh -O check` probe triggers the forced kill and respawn.
 - Exercise attach/detach with the built tmux (no real SSH needed for the
   local-session lifecycle); if a local sshd is available, also test localhost.
@@ -237,9 +249,11 @@ No changes to the pane, session, client or input/output core are needed.
 
 ## Risks / limitations
 
-- The remote tmux still owns its own key bindings/prefix. This is inherent to
-  nested tmux; the pty proxy preserves both prefixes exactly as a manual
-  `ssh -t host tmux ...` would.
+- This is still a pty proxy, not a control-mode mirror. The remote tmux owns
+  its key bindings; the local status is hidden and the local prefix is disabled
+  so the remote UI and prefix are used normally. Host management is reached
+  through `C-g`. If the remote config changes its prefix to `C-g`, that key
+  will conflict with the host escape.
 - Copying plugin *scripts* is best-effort; configs that hard-code paths outside
   `~/.tmux` are not rewritten.
 - `ControlPersist=yes` keeps a background ssh master after the local session is

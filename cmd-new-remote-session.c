@@ -103,12 +103,6 @@ static const char remote_bootstrap[] =
  * ids are recorded only after this command creates them. Pane options alone
  * are not enough to reuse a pane.
  */
-struct remote_pane_ref {
-	u_int			 pane_id;
-	u_int			 window_id;
-	TAILQ_ENTRY(remote_pane_ref) entry;
-};
-
 struct remote_entry {
 	char			*host;
 	char			*port;
@@ -116,7 +110,6 @@ struct remote_entry {
 	char			*token;
 
 	u_int			 session_id;
-	TAILQ_HEAD(remote_pane_refs, remote_pane_ref) panes;
 
 	TAILQ_ENTRY(remote_entry) entry;
 };
@@ -124,7 +117,6 @@ static TAILQ_HEAD(remote_entries, remote_entry) remote_entries =
     TAILQ_HEAD_INITIALIZER(remote_entries);
 
 struct cmd_new_remote_session_data {
-	u_int			 window;
 	struct remote_entry	*entry;
 	char			*host;
 	char			*name;
@@ -281,7 +273,6 @@ remote_entry_get(const char *host, const char *port, const char *name,
 	entry->name = xstrdup(name);
 	entry->token = token;
 	entry->session_id = UINT_MAX;
-	TAILQ_INIT(&entry->panes);
 	TAILQ_INSERT_TAIL(&remote_entries, entry, entry);
 	return (entry);
 }
@@ -341,13 +332,6 @@ remote_session_option(struct session *s, const char *name)
 	return (remote_option(s->options, name));
 }
 
-/* Get a string pane user option, or NULL if not set. */
-static char *
-remote_pane_option(struct window_pane *wp, const char *name)
-{
-	return (remote_option(wp->options, name));
-}
-
 /* Is this pane running the remote helper? */
 static int
 remote_pane_is_helper(struct window_pane *wp)
@@ -357,71 +341,6 @@ remote_pane_is_helper(struct window_pane *wp)
 	return (strcmp(wp->argv[0], "sh") == 0 &&
 	    strcmp(wp->argv[1], "-c") == 0 &&
 	    strcmp(wp->argv[2], remote_helper) == 0);
-}
-
-/* Does this pane belong to the remote host and session? */
-static int
-remote_pane_matches(struct window_pane *wp, const char *host, const char *name)
-{
-	char	*h, *n;
-	int	 match = 0;
-
-	if (!remote_pane_is_helper(wp))
-		return (0);
-	h = remote_pane_option(wp, "@remote_host");
-	n = remote_pane_option(wp, "@remote_session");
-	if (h != NULL && n != NULL && strcmp(h, host) == 0 &&
-	    strcmp(n, name) == 0)
-		match = 1;
-	free(h);
-	free(n);
-	return (match);
-}
-
-/* Record a modal pane for an entry. */
-static void
-remote_modal_pane_add(struct remote_entry *entry, u_int pane_id,
-    u_int window_id)
-{
-	struct remote_pane_ref	*ref, *ref1;
-
-	TAILQ_FOREACH_SAFE(ref, &entry->panes, entry, ref1) {
-		if (ref->pane_id == pane_id || ref->window_id == window_id) {
-			TAILQ_REMOVE(&entry->panes, ref, entry);
-			free(ref);
-		}
-	}
-	ref = xcalloc(1, sizeof *ref);
-	ref->pane_id = pane_id;
-	ref->window_id = window_id;
-	TAILQ_INSERT_TAIL(&entry->panes, ref, entry);
-}
-
-/*
- * Find the modal pane recorded for this remote entry in the current window.
- * A pane with matching options in some other window is not reused: pane
- * options are forgeable by any process in the same server, so reuse is tied
- * to the server-side registry and the invoking window.
- */
-static struct window_pane *
-remote_modal_pane(struct remote_entry *entry, u_int window_id)
-{
-	struct remote_pane_ref	*ref, *ref1;
-	struct window_pane	*wp;
-
-	TAILQ_FOREACH_SAFE(ref, &entry->panes, entry, ref1) {
-		if (ref->window_id != window_id)
-			continue;
-		wp = window_pane_find_by_id(ref->pane_id);
-		if (wp == NULL ||
-		    !remote_pane_matches(wp, entry->host, entry->name)) {
-			TAILQ_REMOVE(&entry->panes, ref, entry);
-			free(ref);
-			return (NULL);
-		}
-		return (wp);
-	}
-	return (NULL);
 }
 
 /* Add a flag and optional value to a tmux argument vector. */
@@ -618,31 +537,42 @@ remote_build_attach(const char *name, struct args *args, int inside)
 	return (line);
 }
 
-/* Build a command to show an existing modal pane to the current client. */
-static char *
-remote_build_show(struct window_pane *wp, struct session *current)
+/*
+ * Make the local proxy session transparent: the remote tmux owns the status
+ * line and the prefix key, while C-g is the host escape into a small local
+ * key table.
+ */
+static void
+remote_apply_local_options(struct session *s)
 {
-	struct cmd_find_state	 fs;
-	char			*name, *line = NULL;
-	size_t			 len = 0;
+	options_set_number(s->options, "status", 0);
+	options_set_number(s->options, "prefix", KEYC_NONE);
+	options_set_number(s->options, "prefix2", KEYC_NONE);
+	options_set_number(s->options, "destroy-unattached", 0);
+}
 
-	if (cmd_find_from_pane(&fs, wp, 0) != 0)
-		fs.s = NULL;
+static struct cmdq_item *
+remote_install_bindings(struct cmdq_item *after)
+{
+	static int		 installed;
+	struct cmdq_item	*next;
 
-	remote_cat(&line, &len, "");
-	if (current == NULL || fs.s != current) {
-		if (fs.s != NULL) {
-			name = args_escape(fs.s->name);
-			remote_cat(&line, &len, "switch-client -t ");
-			remote_cat(&line, &len, name);
-			remote_cat(&line, &len, "; ");
-			free(name);
-		}
-	}
-	xasprintf(&name, "select-window -t @%u", wp->window->id);
-	remote_cat(&line, &len, name);
-	free(name);
-	return (line);
+	if (installed)
+		return (after);
+	next = remote_queue(after,
+	    "bind-key -n C-g switch-client -T tmux-remote-host ; "
+	    "bind-key -T tmux-remote-host c new-session ; "
+	    "bind-key -T tmux-remote-host d detach-client ; "
+	    "bind-key -T tmux-remote-host s choose-tree -s ; "
+	    "bind-key -T tmux-remote-host : command-prompt -P ; "
+	    "bind-key -T tmux-remote-host ? list-keys -T tmux-remote-host ; "
+	    "bind-key -T tmux-remote-host L switch-client -l ; "
+	    "bind-key -T tmux-remote-host n switch-client -n ; "
+	    "bind-key -T tmux-remote-host p switch-client -p");
+	if (next == NULL)
+		return (after);
+	installed = 1;
+	return (next);
 }
 
 /* Mark a pane as handling a remote session. */
@@ -666,38 +596,22 @@ cmd_new_remote_session_done(__unused struct cmdq_item *item, void *data)
 	struct cmd_new_remote_session_data	*d = data;
 	struct session				*s;
 	struct winlink				*wl;
-	struct window				*w;
 	struct window_pane			*wp;
 
-	if (d->window != UINT_MAX) {
-		w = window_find_by_id(d->window);
-		if (w != NULL) {
-			wp = w->modal;
-			if (wp == NULL)
-				wp = w->active;
-			if (wp != NULL && remote_mark_pane(wp, d))
-				remote_modal_pane_add(d->entry, wp->id, w->id);
-			options_set_string(w->options, "@remote_host", 0, "%s",
-			    d->host);
-			options_set_string(w->options, "@remote_session", 0,
-			    "%s", d->name);
-		}
-	} else {
-		s = session_find(d->name);
-		if (s != NULL) {
-			options_set_string(s->options, "@remote_host", 0, "%s",
-			    d->host);
-			options_set_string(s->options, "@remote_session", 0,
-			    "%s", d->name);
-			if (d->port != NULL)
-				options_set_string(s->options, "@remote_port",
-				    0, "%s", d->port);
-			options_set_number(s->options, "destroy-unattached", 0);
-			wl = s->curw;
-			if (wl != NULL && (wp = wl->window->active) != NULL) {
-				if (remote_mark_pane(wp, d))
-					d->entry->session_id = s->id;
-			}
+	s = session_find(d->name);
+	if (s != NULL) {
+		options_set_string(s->options, "@remote_host", 0, "%s",
+		    d->host);
+		options_set_string(s->options, "@remote_session", 0, "%s",
+		    d->name);
+		if (d->port != NULL)
+			options_set_string(s->options, "@remote_port", 0, "%s",
+			    d->port);
+		remote_apply_local_options(s);
+		wl = s->curw;
+		if (wl != NULL && (wp = wl->window->active) != NULL) {
+			if (remote_mark_pane(wp, d))
+				d->entry->session_id = s->id;
 		}
 	}
 
@@ -811,7 +725,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct cmdq_item		*after = item, *next;
 	struct session			*s;
 	struct winlink			*wl;
-	struct window_pane		*wp, *mwp;
+	struct window_pane		*wp;
 	struct environ_entry		*ee;
 	struct remote_entry		*entry;
 	struct cmd_new_remote_session_data *data;
@@ -823,7 +737,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	const char			*runtime;
 	char				*remote = NULL, *ssh = NULL;
 	char				*nflags = NULL, *rhost = NULL;
-	char				*escaped, *tmp, *title = NULL;
+	char				*escaped, *tmp;
 	char				*respawn = NULL, *show = NULL;
 	size_t				 nlen = 0;
 	char				**argv = NULL, **rargv = NULL, **hargv = NULL;
@@ -921,48 +835,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	remote = remote_build_command(token, rargc, rargv);
 	hargv = remote_build_helper_argv(host, port, ctl, token, remote, force,
 	    key, &hargc);
-
-	/*
-	 * When run from inside tmux, show the remote session in a full-size
-	 * modal pane in the invoking window rather than switching sessions.
-	 * Reuse an existing remote modal pane when there is one.
-	 */
-	if (inside && !detached && wp != NULL && wp->window != NULL) {
-		mwp = remote_modal_pane(entry, wp->window->id);
-		if (mwp != NULL) {
-			dead = window_pane_exited(mwp);
-			show = remote_build_show(mwp, fs.s);
-			if (!force && !dead) {
-				fargv = remote_build_helper_argv(host, port,
-				    ctl, token, remote, 1, key, &fargc);
-				respawn = remote_build_respawn(mwp, fargc,
-				    fargv);
-				if (remote_start_check(item, fs.s, host, ctl,
-				    respawn, show) == 0) {
-					respawn = NULL;
-					show = NULL;
-					retval = CMD_RETURN_WAIT;
-				} else {
-					next = remote_queue(after, "%s",
-					    respawn);
-					if (next != NULL)
-						after = next;
-					next = remote_queue(after, "%s", show);
-					if (next != NULL)
-						after = next;
-				}
-			} else {
-				next = remote_queue_respawn(after, mwp, hargc,
-				    hargv);
-				if (next != NULL)
-					after = next;
-				next = remote_queue(after, "%s", show);
-				if (next != NULL)
-					after = next;
-			}
-			goto done;
-		}
-	}
+	after = remote_install_bindings(after);
 
 	s = session_find(name);
 	if (s != NULL) {
@@ -988,7 +861,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		if (port != NULL)
 			options_set_string(s->options, "@remote_port", 0, "%s",
 			    port);
-		options_set_number(s->options, "destroy-unattached", 0);
+		remote_apply_local_options(s);
 
 		wl = s->curw;
 		if (wl == NULL)
@@ -1038,42 +911,6 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 
 	ssh = cmd_stringify_argv(hargc, hargv);
 
-	/* Inside tmux, create the SSH session in a full-size modal pane. */
-	if (inside && !detached) {
-		if (wp == NULL || wp->window == NULL) {
-			cmdq_error(item, "no current pane");
-			goto fail;
-		}
-		if (wp->window->modal != NULL) {
-			cmdq_error(item, "window already has a modal pane");
-			goto fail;
-		}
-		if ((value = args_get(args, 'n')) != NULL)
-			title = format_single(item, value, c, NULL, NULL,
-			    NULL);
-		else
-			xasprintf(&title, "remote %s:%s", host, name);
-		escaped = args_escape(title);
-		next = remote_queue(after,
-		    "new-pane -O -x 100%% -y 100%% -X 0 -Y 0 -T %s "
-		    "-t %%%u -- %s", escaped, wp->id, ssh);
-		free(escaped);
-		if (next == NULL)
-			goto fail;
-		after = next;
-
-		data = xcalloc(1, sizeof *data);
-		data->window = wp->window->id;
-		data->entry = entry;
-		data->host = xstrdup(host);
-		data->name = xstrdup(name);
-		if (port != NULL)
-			data->port = xstrdup(port);
-		after = cmdq_insert_after(after,
-		    cmdq_get_callback(cmd_new_remote_session_done, data));
-		goto done;
-	}
-
 	remote_cat(&nflags, &nlen, "");
 	if (args_has(args, 'D'))
 		remote_cat(&nflags, &nlen, " -D");
@@ -1096,7 +933,6 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	after = next;
 
 	data = xcalloc(1, sizeof *data);
-	data->window = UINT_MAX;
 	data->entry = entry;
 	data->host = xstrdup(host);
 	data->name = xstrdup(name);
@@ -1104,6 +940,14 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		data->port = xstrdup(port);
 	after = cmdq_insert_after(after,
 	    cmdq_get_callback(cmd_new_remote_session_done, data));
+
+	if (inside && !detached) {
+		escaped = remote_build_attach(name, args, 1);
+		next = remote_queue(after, "%s", escaped);
+		free(escaped);
+		if (next != NULL)
+			after = next;
+	}
 
 done:
 	free(host);
@@ -1115,7 +959,6 @@ done:
 	free(ssh);
 	free(nflags);
 	free(rhost);
-	free(title);
 	free(respawn);
 	free(show);
 	cmd_free_argv(argc, argv);
@@ -1134,7 +977,6 @@ fail:
 	free(ssh);
 	free(nflags);
 	free(rhost);
-	free(title);
 	free(respawn);
 	free(show);
 	cmd_free_argv(fargc, fargv);

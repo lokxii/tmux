@@ -57,9 +57,8 @@ trap cleanup 0 1 15
 
 remote_pane()
 {
-	$TMUX list-panes -t inside-main:0 \
-	    -F '#{pane_id}:#{pane_remote}:#{pane_pid}' |
-	    grep ':inside.test:' | head -1
+	$TMUX list-panes -t popup:0 \
+	    -F '#{pane_id}:#{pane_remote}:#{pane_pid}' 2>/dev/null | head -1
 }
 
 : >"$FAKE_SSH_LOG"
@@ -163,8 +162,9 @@ while [ -z "$($TMUX list-clients -F '#{client_session}')" ]; do
 	sleep 0.1
 done
 
-# Inside tmux the remote session must appear as a full-size modal pane in the
-# current window, and the client must stay on its original session.
+# Inside tmux the client switches to a dedicated local proxy session. The
+# local status line and prefix are disabled, so the remote tmux is the only
+# status bar and owns C-b; C-g is the host escape.
 $TMUX send-keys -t inside-main:0.0 \
     "$TEST_TMUX -Ltest$$ new-remote-session -H inside.test -s popup" Enter ||
 	exit 1
@@ -174,28 +174,32 @@ while [ -z "$(remote_pane)" ]; do
 	[ "$i" -gt 50 ] && exit 1
 	sleep 0.1
 done
-[ "$($TMUX list-clients -F '#{client_session}')" = inside-main ] || exit 1
-[ "$($TMUX show-options -w -t inside-main:0 -v @remote_host)" = inside.test ] ||
+[ "$($TMUX list-clients -F '#{client_session}')" = popup ] || exit 1
+[ "$($TMUX show-options -t popup -v @remote_host)" = inside.test ] || exit 1
+[ "$($TMUX show-options -t popup -v status)" = off ] || exit 1
+[ "$($TMUX show-options -t popup -v prefix)" = None ] || exit 1
+$TMUX list-keys -T tmux-remote-host | grep -F 'new-session' >/dev/null ||
 	exit 1
+$TMUX list-keys -T root C-g >/dev/null 2>&1 || exit 1
 [ "$($TMUX show-options -p -A -t "$(remote_pane | cut -d: -f1)" \
     -v remain-on-exit)" = off ] || exit 1
 
-# Output from the SSH pane is rendered by the modal pane, and input sent to
-# the modal pane reaches the SSH child.
+# Output from the SSH pane is rendered in the proxy session, and input sent
+# to it reaches the SSH child.
 line=$(remote_pane)
-modal_id=${line%%:*}
-$TMUX capture-pane -p -t "$modal_id" | grep -F 'REMOTE-OUT' >/dev/null ||
+pane_id=${line%%:*}
+$TMUX capture-pane -p -t "$pane_id" | grep -F 'REMOTE-OUT' >/dev/null ||
 	exit 1
-$TMUX send-keys -t "$modal_id" 'hello' Enter || exit 1
+$TMUX send-keys -t "$pane_id" 'hello' Enter || exit 1
 i=0
-while ! $TMUX capture-pane -p -t "$modal_id" |
+while ! $TMUX capture-pane -p -t "$pane_id" |
     grep -F 'REMOTE-IN:hello' >/dev/null; do
 	i=$((i + 1))
 	[ "$i" -gt 30 ] && exit 1
 	sleep 0.1
 done
 
-# A healthy existing modal pane is reused without reconnecting.
+# A healthy existing proxy pane is reused without reconnecting.
 old_id=${line%%:*}
 old_pid=${line##*:}
 : >"$FAKE_SSH_LOG"
