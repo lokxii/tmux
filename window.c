@@ -2132,7 +2132,7 @@ window_pane_copy_paste(struct window_pane *wp, char *buf, size_t len)
 	TAILQ_FOREACH(loop, &wp->window->panes, entry) {
 		if (loop != wp &&
 		    TAILQ_EMPTY(&loop->modes) &&
-		    loop->fd != -1 &&
+		    window_pane_is_live(loop) &&
 		    (~loop->flags & PANE_INPUTOFF) &&
 		    window_pane_is_visible(loop) &&
 		    options_get_number(loop->options, "synchronize-panes")) {
@@ -2150,7 +2150,7 @@ window_pane_copy_key(struct window_pane *wp, key_code key)
 	TAILQ_FOREACH(loop, &wp->window->panes, entry) {
 		if (loop != wp &&
 		    TAILQ_EMPTY(&loop->modes) &&
-		    loop->fd != -1 &&
+		    window_pane_is_live(loop) &&
 		    (~loop->flags & PANE_INPUTOFF) &&
 		    window_pane_is_visible(loop) &&
 		    options_get_number(loop->options, "synchronize-panes"))
@@ -2164,7 +2164,7 @@ window_pane_paste(struct window_pane *wp, key_code key, char *buf, size_t len)
 	if (!TAILQ_EMPTY(&wp->modes))
 		return;
 
-	if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
+	if (!window_pane_is_live(wp) || wp->flags & PANE_INPUTOFF)
 		return;
 
 	if (KEYC_IS_PASTE(key) && (~wp->screen->mode & MODE_BRACKETPASTE))
@@ -2201,7 +2201,7 @@ window_pane_key(struct window_pane *wp, struct client *c, struct session *s,
 		return (0);
 	}
 
-	if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
+	if (!window_pane_is_live(wp) || wp->flags & PANE_INPUTOFF)
 		return (0);
 
 	if (input_key_pane(wp, key, m) != 0)
@@ -2223,9 +2223,19 @@ window_pane_is_visible(struct window_pane *wp)
 }
 
 int
+window_pane_is_live(struct window_pane *wp)
+{
+	if (wp->flags & PANE_EXITED)
+		return (0);
+	if (wp->flags & PANE_REMOTE)
+		return (wp->event != NULL);
+	return (wp->fd != -1);
+}
+
+int
 window_pane_exited(struct window_pane *wp)
 {
-	return (wp->fd == -1 || (wp->flags & PANE_EXITED));
+	return (!window_pane_is_live(wp));
 }
 
 u_int

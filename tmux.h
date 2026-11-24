@@ -1393,6 +1393,7 @@ struct window_pane {
 #define PANE_FLOATOVERZOOM 0x200000
 #define PANE_CLOSEONCANCEL 0x400000
 #define PANE_UTMP 0x800000
+#define PANE_REMOTE 0x1000000
 
 	bitstr_t       **sync_dirty;
 	u_int		 sync_dirty_sx;
@@ -3857,6 +3858,7 @@ struct window_pane *window_add_pane(struct window *, struct window_pane *,
 		     u_int, int);
 void		 window_resize(struct window *, u_int, u_int, int, int);
 void		 window_pane_send_resize(struct window_pane *, u_int, u_int);
+int		 window_pane_is_live(struct window_pane *);
 int		 window_zoom(struct window_pane *);
 int		 window_unzoom(struct window *, int);
 int		 window_active_pane_is_over_zoom(struct window *);
