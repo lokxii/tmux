@@ -669,6 +669,15 @@ cmdq_fire_command(struct cmdq_item *item)
 	if (retval == CMD_RETURN_ERROR)
 		goto out;
 
+	switch (remote_route_command(item, cmd, entry)) {
+	case 1:
+		retval = CMD_RETURN_NORMAL;
+		goto out;
+	case -1:
+		retval = CMD_RETURN_ERROR;
+		goto out;
+	}
+
 	retval = entry->exec(cmd, item);
 	if (retval == CMD_RETURN_ERROR)
 		goto out;

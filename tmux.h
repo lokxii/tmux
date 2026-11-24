@@ -79,6 +79,8 @@ struct screen_write_citem;
 struct screen_write_cline;
 struct screen_write_ctx;
 struct session;
+struct remote;
+struct remote_pane;
 
 struct tty_ctx;
 struct tty_code;
@@ -1457,6 +1459,10 @@ struct window_pane {
 	pid_t		 pipe_pid;
 	struct bufferevent *pipe_event;
 	struct window_pane_offset pipe_offset;
+
+	/* Control-mode mirror state (see remote.c). */
+	struct remote		*remote;
+	struct remote_pane	*remote_pane;
 
 	struct screen	*screen;
 	struct screen	 base;
@@ -3806,6 +3812,15 @@ int	 screen_alternate_on(struct screen *, struct grid_cell *, int);
 int	 screen_alternate_off(struct screen *, struct grid_cell *, int);
 const char *screen_mode_to_string(int);
 const char *screen_print(struct screen *, int);
+
+/* remote.c */
+struct remote	*remote_start(const char *, const char *, const char *,
+		     const char *, const char *, struct cmdq_item *,
+		     struct client *, int, int);
+struct remote	*remote_find_by_session(struct session *);
+int		 remote_route_command(struct cmdq_item *, struct cmd *,
+		     const struct cmd_entry *);
+void		 remote_pane_destroy(struct window_pane *);
 
 /* window.c */
 extern struct windows windows;

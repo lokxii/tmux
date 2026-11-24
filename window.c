@@ -1665,6 +1665,9 @@ window_pane_destroy(struct window_pane *wp)
 	window_pane_free_modes(wp);
 	screen_write_sync_clear_dirty(wp);
 
+	if (wp->remote_pane != NULL)
+		remote_pane_destroy(wp);
+
 	if (wp->event != NULL) {
 		bufferevent_free(wp->event);
 		wp->event = NULL;

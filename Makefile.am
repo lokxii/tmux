@@ -121,6 +121,7 @@ dist_tmux_SOURCES = \
 	cmd-list-windows.c \
 	cmd-load-buffer.c \
 	cmd-lock-server.c \
+	cmd-mirror-session.c \
 	cmd-move-window.c \
 	cmd-new-remote-session.c \
 	cmd-new-session.c \
@@ -196,6 +197,7 @@ dist_tmux_SOURCES = \
 	prompt-history.c \
 	prompt.c \
 	regsub.c \
+	remote.c \
 	resize.c \
 	screen-redraw.c \
 	screen-write.c \

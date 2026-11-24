@@ -1492,101 +1492,51 @@ flag.
 The file is passed to the SSH clients used for both the configuration copy and
 the interactive remote session.
 .Pp
-Outside tmux the new session is attached to the current terminal, so SSH input
-and output use the terminal's stdin and stdout.
-When run from a pane inside tmux, a dedicated local proxy session is created
-and the invoking client switches to it, so the remote session fills the client
-and the client's original session is left untouched.
-The proxy session is reused by a later invocation and its identity is
-available as
-.Ql #{pane_remote} ,
-.Ql #{pane_remote_host}
-and
-.Ql #{pane_remote_session} .
-.Fl d
-creates a detached local session without switching to it.
+Outside tmux the mirrored session is attached to the current terminal.
+When run from a pane inside tmux, the invoking client switches to the mirrored
+session, leaving its original session untouched.
+The local tmux server is the only UI: remote windows and panes are mirrored
+into local windows and panes, so the local status line is the only status bar
+and the normal tmux prefix, key bindings, copy mode and command prompt work.
 .Pp
-The local proxy session is configured so there is only one tmux status line:
-its own
-.Ic status
-is off and the remote tmux status line is used.
-Its
-.Ic prefix
-and
-.Ic prefix2
-are disabled, so the remote tmux receives its own prefix and handles remote
-commands such as
-.Ic new\-window ,
-.Ic split\-window
-and the remote command prompt.
-The
-.Ql C\-g
-key is installed as the host escape: it enters the
-.Ql tmux\-remote\-host
-key table for local commands.
-By default
-.Ql c
-runs
+Commands are routed by name and target.
+Session, client and local-server commands such as
 .Ic new\-session ,
-.Ql d
-runs
-.Ic detach\-client ,
-.Ql s
-runs a local
-.Ic choose\-tree ,
-.Ql :
-opens a local command prompt,
-.Ql ?
-lists the host keys, and
-.Ql L ,
-.Ql n
+.Ic attach\-session ,
+.Ic detach\-client
 and
-.Ql p
-switch local sessions.
-Run a command with the prefix of the tmux layer that should execute it, or use
-the corresponding command prompt.
+.Ic switch\-client
+run locally.
+Window, pane and layout commands such as
+.Ic new\-window ,
+.Ic split\-window ,
+.Ic select\-window ,
+.Ic select\-pane ,
+.Ic resize\-pane
+and the layout commands are sent over the control channel and applied to the
+remote tmux server; the resulting state is mirrored back into the local
+session.
+Explicit targets are translated from local mirror IDs to remote IDs where
+supported.
 .Pp
-The SSH connection uses a persistent
-.Xr ssh 1
-control master and server keepalives.
-Detaching the local client leaves the SSH connection running.
-Exiting the remote shell or detaching the remote tmux client closes the SSH
-connection.
-With the default
-.Ic remain\-on\-exit
-value of
-.Ql off ,
-the SSH pane is killed and, if it was the last pane, the local window and
-session are destroyed normally.
-This command does not override
-.Ic remain\-on\-exit ,
-so setting it to
-.Ql on ,
-.Ql key
-or another choice keeps the dead pane and session according to the normal tmux
-rules.
-The control master remains alive, so a later invocation recreates the local
-pane and session while reusing the existing SSH connection.
-Before attaching to an existing live remote pane, an
-.Xr ssh 1
-liveness check runs with a five second timeout: it verifies the control
-master and then performs a multiplexed round trip through it.
-If the check fails or hangs, the old connection is killed and re-established
-automatically.
-.Fl R
-performs the same reconnect immediately without waiting for the check, which
-is useful if SSH is known to have hung.
-.Pp
-Before starting the remote tmux, the local
+The mirror uses a private remote tmux server on a random socket.
+The local
 .Pa ~/.tmux ,
 .Pa ~/.tmux.conf
 and
 .Pa ~/.config/tmux
-are copied to a private cache directory on the remote host.
-References to those paths in the copied configuration are rewritten to the
-cache directory, and the plugin manager path is set to the copied plugin
-directory, so local settings and plugins are inherited without modifying the
-remote user's files.
+are copied to a cache directory on the remote host and loaded by that server,
+so the status line and settings match the local configuration without
+modifying the remote user's own tmux server.
+The remote host only needs standard
+.Xr tmux 1 ;
+it does not need this fork.
+.Pp
+The SSH connection uses a persistent
+.Xr ssh 1
+control master and server keepalives.
+Detaching the local client leaves the control connection running.
+The control master remains available for a later invocation.
 Remote tmux is started with
 .Ql TERM=xterm\-256color
 so it does not depend on the remote host having a
