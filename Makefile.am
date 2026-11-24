@@ -309,3 +309,4 @@ install-exec-hook:
 # And uninstall it.
 uninstall-hook:
 	rm -f $(DESTDIR)$(mandir)/man1/tmux.1
+	rm -f $(srcdir)/tmux.1.mdoc $(srcdir)/tmux.1.man
