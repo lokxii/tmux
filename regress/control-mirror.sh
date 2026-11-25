@@ -81,6 +81,12 @@ local_capture_has() {
 	    grep -q "$1"
 }
 
+# Exact window name match (no regex: names may contain the separator).
+local_name_is() {
+	"$TMUX_BIN" -L "$L" list-windows -t mirror -F '#{window_name}' |
+	    grep -qxF "$1"
+}
+
 remote_capture_has() {
 	"$TMUX_BIN" -L "$R" capture-pane -p -t mirror:0.0 |
 	    grep -q "$1"
@@ -135,6 +141,15 @@ wait_for "window renamed" local_has renamed
 wait_for "window selection mirrored" local_active 1
 "$TMUX_BIN" -L "$R" kill-window -t mirror:1
 wait_for "window close mirrored" local_count 1
+
+# Window names may contain the field separator. A rename is mirrored through
+# %window-renamed...
+"$TMUX_BIN" -L "$R" rename-window -t mirror:0 'a|b'
+wait_for "separator name mirrored on rename" local_name_is 'a|b'
+# ...and a newly added window is mirrored through the list-windows reply,
+# which must parse the name as the whole remainder of the line.
+"$TMUX_BIN" -L "$R" new-window -d -t mirror -n 'sep|name'
+wait_for "separator name mirrored on add" local_name_is 'sep|name'
 
 # %exit / EOF: kill the remote server, local mirror session must go away but
 # the local server and its own session must survive.

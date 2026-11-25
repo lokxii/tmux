@@ -34,6 +34,12 @@
  */
 #define REMOTE_FIELD_SEP "|"
 
+/* Cap on the output buffered for a pane which does not exist yet. */
+#define REMOTE_EARLY_LIMIT (1024 * 1024)
+
+/* How long to wait for the remote bootstrap before giving up, in seconds. */
+#define REMOTE_BOOTSTRAP_TIMEOUT 60
+
 /* Pane ID mapping. */
 struct remote_pane {
 	u_int			 id;		/* remote pane id (%N) */
@@ -80,6 +86,7 @@ struct remote_query {
 struct remote_early {
 	u_int			 id;
 	struct evbuffer		*data;
+	int			 dropped;	/* logged the limit hit */
 	TAILQ_ENTRY(remote_early) entry;
 };
 
@@ -109,6 +116,8 @@ struct remote {
 	u_int			 session_id;
 	int			 booting;
 	int			 booted;
+	struct event		 boot_timer;	/* bootstrap timeout */
+	int			 boot_timed_out;
 
 	struct cmdq_item	*wait_item;
 	struct client		*wait_client;
@@ -127,6 +136,7 @@ RB_PROTOTYPE_STATIC(remote_windows, remote_window, entry, remote_window_cmp);
 RB_PROTOTYPE_STATIC(remote_panes, remote_pane, entry, remote_pane_cmp);
 
 static void	remote_free(struct remote *);
+static void	remote_free_cb(int, short, void *);
 static void	remote_reset(struct remote *);
 static void	remote_read_line(struct remote *, char *);
 static void	remote_dispatch_event(struct remote *, char *);
@@ -146,6 +156,7 @@ static void	remote_bootstrap_panes(struct remote *,
 		    struct remote_query *);
 static void	remote_bootstrap_error(struct remote *,
 		    struct remote_query *);
+static void	remote_bootstrap_timer(int, short, void *);
 static void	remote_attach(struct remote *);
 static void	remote_fail_wait(struct remote *, const char *);
 static void	remote_job_update(struct job *);
@@ -315,6 +326,16 @@ remote_buffer_early(struct remote *r, u_int id, const u_char *data, size_t len)
 		re->data = evbuffer_new();
 		TAILQ_INSERT_TAIL(&r->early, re, entry);
 	}
+	if (EVBUFFER_LENGTH(re->data) >= REMOTE_EARLY_LIMIT) {
+		/* The pane may never exist (a remote popup, for example). */
+		if (!re->dropped) {
+			re->dropped = 1;
+			remote_log(r, "early buffer for pane %%%u full", id);
+		}
+		return;
+	}
+	if (EVBUFFER_LENGTH(re->data) + len > REMOTE_EARLY_LIMIT)
+		len = REMOTE_EARLY_LIMIT - EVBUFFER_LENGTH(re->data);
 	evbuffer_add(re->data, data, len);
 }
 
@@ -794,9 +815,10 @@ remote_parse_window_line(struct remote *r, char *line)
 		return;
 	field = strsep(&iter, REMOTE_FIELD_SEP);
 	active = field != NULL ? strtoul(field, NULL, 10) : 0;
-	name = strsep(&iter, REMOTE_FIELD_SEP);
-	if (name == NULL)
+	/* The name is the remainder of the line and may contain the separator. */
+	if (iter == NULL)
 		return;
+	name = iter;
 
 	rw = remote_window_get(r, id, 1);
 	rw->idx = idx;
@@ -910,6 +932,26 @@ remote_reorder_panes(struct remote *r, struct remote_window *rw)
 			array[i++] = rp;
 	}
 	qsort(array, n, sizeof *array, remote_pane_idx_cmp);
+
+	/*
+	 * Only reorder when every non-floating local pane is in the remote
+	 * list; otherwise rebuilding the lists would silently orphan panes
+	 * which are not in the array (they would never be destroyed and may
+	 * still be referenced as the active pane).
+	 */
+	TAILQ_FOREACH(wp, &rw->w->panes, entry) {
+		if (window_pane_is_floating(wp))
+			continue;
+		rp = wp->remote_pane;
+		if (rp == NULL || rp->wp != wp || rp->window_id != rw->id)
+			break;
+	}
+	if (wp != NULL) {
+		remote_log(r, "window @%u: pane %%%u not in remote list, "
+		    "not reordering", rw->id, wp->id);
+		free(array);
+		return;
+	}
 
 	TAILQ_FOREACH(wp, &rw->w->panes, entry)
 		TAILQ_REMOVE(&rw->w->panes, wp, entry);
@@ -1078,6 +1120,28 @@ remote_fail_wait(struct remote *r, const char *reason)
 	r->wait_client = NULL;
 }
 
+/* Bootstrap timed out: the control stream never completed it. */
+static void
+remote_bootstrap_timer(__unused int fd, __unused short events, void *arg)
+{
+	struct remote	*r = arg;
+
+	if (r->booted || r->boot_timed_out)
+		return;
+	r->boot_timed_out = 1;
+	remote_log(r, "bootstrap timed out after %d seconds",
+	    REMOTE_BOOTSTRAP_TIMEOUT);
+
+	/*
+	 * Stop the control stream and tear the remote down from the event
+	 * loop, using the same deferral as remote_session_destroyed().
+	 */
+	remote_fail_wait(r, "timed out waiting for the remote session");
+	if (r->event != NULL)
+		bufferevent_disable(r->event, EV_READ|EV_WRITE);
+	event_once(-1, EV_TIMEOUT, remote_free_cb, r, NULL);
+}
+
 /* Bootstrap step 2: list remote panes. */
 static void
 remote_bootstrap_panes(struct remote *r, __unused struct remote_query *q)
@@ -1110,6 +1174,8 @@ remote_bootstrap_panes(struct remote *r, __unused struct remote_query *q)
 		remote_sync_layout(r, rw);
 	}
 	remote_set_active_window(r);
+	if (event_initialized(&r->boot_timer))
+		event_del(&r->boot_timer);
 	r->booted = 1;
 	remote_log(r, "bootstrap complete");
 	server_redraw_session(r->session);
@@ -1137,6 +1203,7 @@ remote_start(const char *remote_command, const char *session_name,
     int wait_detached)
 {
 	struct remote	*r;
+	struct timeval	 tv;
 
 	if (remote_command == NULL || *remote_command == '\0')
 		return (NULL);
@@ -1172,6 +1239,9 @@ remote_start(const char *remote_command, const char *session_name,
 	if (r->job == NULL) {
 		remote_log(r, "cannot run: %s", remote_command);
 		free(r->session_name);
+		free(r->host);
+		free(r->port);
+		free(r->token);
 		evbuffer_free(r->reply);
 		free(r);
 		return (NULL);
@@ -1180,6 +1250,12 @@ remote_start(const char *remote_command, const char *session_name,
 
 	TAILQ_INSERT_TAIL(&remotes, r, entry);
 	remote_log(r, "started: %s", remote_command);
+
+	/* Give up if the remote never finishes the bootstrap. */
+	evtimer_set(&r->boot_timer, remote_bootstrap_timer, r);
+	tv.tv_sec = REMOTE_BOOTSTRAP_TIMEOUT;
+	tv.tv_usec = 0;
+	evtimer_add(&r->boot_timer, &tv);
 
 	return (r);
 }
@@ -1273,6 +1349,7 @@ remote_reply_end(struct remote *r, char *line, int error)
 	}
 	if (t != r->reply_time || n != r->reply_number) {
 		remote_log(r, "reply metadata mismatch");
+		evbuffer_drain(r->reply, EV_SIZE_MAX);
 		return;
 	}
 
@@ -1285,17 +1362,22 @@ remote_reply_end(struct remote *r, char *line, int error)
 		}
 	}
 
-	if (f & 1) {
-		q = TAILQ_FIRST(&r->queries);
-		if (q == NULL)
-			remote_log(r, "no query for reply %u", n);
-		else {
-			TAILQ_REMOVE(&r->queries, q, entry);
-			cb = error ? q->error : q->done;
-			if (cb != NULL)
-				cb(r, q);
-			remote_query_free(q);
-		}
+	/*
+	 * Every reply closes the query at the head of the queue, whatever
+	 * its flags: replies for commands the remote does not know still
+	 * correspond to a queued query, and not popping it would leave the
+	 * queue desynchronized (the next reply would match the stale
+	 * query).
+	 */
+	q = TAILQ_FIRST(&r->queries);
+	if (q == NULL)
+		remote_log(r, "no query for reply %u", n);
+	else {
+		TAILQ_REMOVE(&r->queries, q, entry);
+		cb = error ? q->error : q->done;
+		if (cb != NULL)
+			cb(r, q);
+		remote_query_free(q);
 	}
 	evbuffer_drain(r->reply, EV_SIZE_MAX);
 }
@@ -1334,12 +1416,18 @@ remote_dispatch_event(struct remote *r, char *line)
 		return;
 	}
 	if (strncmp(line, "%window-add ", 12) == 0) {
-		id = strtoul(line + 12 + 1, NULL, 10);
+		p = line + 12;
+		if (*p != '@')
+			return;
+		id = strtoul(p + 1, NULL, 10);
 		remote_window_add(r, id);
 		return;
 	}
 	if (strncmp(line, "%window-close ", 14) == 0) {
-		id = strtoul(line + 14 + 1, NULL, 10);
+		p = line + 14;
+		if (*p != '@')
+			return;
+		id = strtoul(p + 1, NULL, 10);
 		remote_window_close(r, id);
 		return;
 	}
@@ -1681,6 +1769,8 @@ static void
 remote_free(struct remote *r)
 {
 	remote_log(r, "free");
+	if (event_initialized(&r->boot_timer))
+		event_del(&r->boot_timer);
 	remote_reset(r);
 	free(r->session_name);
 	free(r->remote_name);
