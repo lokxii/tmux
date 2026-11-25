@@ -99,6 +99,7 @@ struct remote {
 	u_int			 reply_flags;
 
 	struct session		*session;
+	struct session		*destroy_session;
 	char			*session_name;
 	char			*remote_name;
 	char			*host;
@@ -114,6 +115,7 @@ struct remote {
 	struct client		*wait_client;
 	int			 wait_inside;
 	int			 wait_detached;
+	int			 free_pending;
 
 	TAILQ_ENTRY(remote)	 entry;
 };
@@ -127,7 +129,10 @@ RB_PROTOTYPE_STATIC(remote_windows, remote_window, entry, remote_window_cmp);
 RB_PROTOTYPE_STATIC(remote_panes, remote_pane, entry, remote_pane_cmp);
 
 static void	remote_free(struct remote *);
-static void	remote_reset(struct remote *);
+static void	remote_free_cb(int, short, void *);
+static void	remote_reset(struct remote *, int);
+static void	remote_destroy_session_now(struct remote *);
+static void	remote_destroy_session_cb(int, short, void *);
 static void	remote_read_line(struct remote *, char *);
 static void	remote_dispatch_event(struct remote *, char *);
 static void	remote_reply_begin(struct remote *, char *);
@@ -170,7 +175,7 @@ static void	remote_flush_early(struct remote *, u_int);
 static struct remote_window *remote_window_get(struct remote *, u_int, int);
 static struct remote_pane *remote_pane_get(struct remote *, u_int, int);
 static void	remote_create_session(struct remote *);
-static void	remote_destroy_session(struct remote *);
+static void	remote_destroy_session(struct remote *, int);
 static void	remote_create_local_window(struct remote *, struct remote_window *);
 static void	remote_parse_window_line(struct remote *, char *);
 static void	remote_parse_pane_line(struct remote *, char *);
@@ -439,9 +444,31 @@ remote_create_session(struct remote *r)
 	free(base);
 }
 
-/* Destroy the local mirror session and all of its windows. */
+/*
+ * Destroy a session and any others in its group, detaching any clients first,
+ * exactly as the server does when a session is killed. The server version of
+ * this is static in server-fn.c.
+ */
 static void
-remote_destroy_session(struct remote *r)
+remote_destroy_session_group(struct session *s)
+{
+	struct session_group	*sg;
+	struct session		*s1;
+
+	if ((sg = session_group_contains(s)) == NULL) {
+		server_destroy_session(s);
+		session_destroy(s, 1, __func__);
+	} else {
+		TAILQ_FOREACH_SAFE(s, &sg->sessions, gentry, s1) {
+			server_destroy_session(s);
+			session_destroy(s, 1, __func__);
+		}
+	}
+}
+
+/* Destroy the local mirror session immediately. Event loop contexts only. */
+static void
+remote_destroy_session_now(struct remote *r)
 {
 	struct session		*s = r->session;
 	struct remote_window	*rw;
@@ -455,11 +482,79 @@ remote_destroy_session(struct remote *r)
 		free(rw);
 	}
 
-	if (s != NULL) {
+	/* A session with no windows cannot currently be destroyed. */
+	if (s != NULL && s->curw != NULL)
+		remote_destroy_session_group(s);
+}
+
+/* Deferred destruction of the mirror session; runs in the event loop. */
+static void
+remote_destroy_session_cb(__unused int fd, __unused short events, void *arg)
+{
+	struct remote	*r = arg;
+	struct session	*s = r->destroy_session;
+
+	r->destroy_session = NULL;
+	if (s != NULL && r->session == s) {
+		/*
+		 * The session is still the one remembered: destroy it. If it
+		 * was destroyed by someone else in the meantime,
+		 * remote_session_destroyed() will have cleared r->session and
+		 * it must not be touched again here.
+		 */
+		r->session = NULL;
 		if (s->curw != NULL)
-			session_destroy(s, 1, __func__);
-		/* A session with no windows cannot currently be destroyed. */
+			remote_destroy_session_group(s);
 	}
+	if (r->free_pending) {
+		/* The control connection is gone: finish freeing the remote. */
+		remote_free(r);
+		return;
+	}
+
+	/*
+	 * The remote may still be connected: its session can be switched and
+	 * rebuilt or a new one attached, so resume processing it.
+	 */
+	if (r->event != NULL)
+		bufferevent_enable(r->event, EV_READ|EV_WRITE);
+}
+
+/* Destroy the local mirror session and all of its windows. */
+static void
+remote_destroy_session(struct remote *r, int fail_wait)
+{
+	struct session		*s = r->session;
+	struct remote_window	*rw;
+
+	if (fail_wait)
+		remote_fail_wait(r, "local mirror session destroyed");
+
+	while ((rw = RB_MIN(remote_windows, &r->windows)) != NULL) {
+		RB_REMOVE(remote_windows, &r->windows, rw);
+		free(rw->layout);
+		free(rw->name);
+		free(rw);
+	}
+
+	/*
+	 * Nothing to destroy, or a destruction of this remote is already
+	 * scheduled and will handle the session.
+	 */
+	if (s == NULL || r->destroy_session != NULL || r->free_pending)
+		return;
+
+	/*
+	 * This may be called from inside a job read callback. Destroying the
+	 * session detaches clients and frees panes and must not happen here,
+	 * so defer it to the event loop. The session is remembered and
+	 * checked when the callback runs, so it is never destroyed twice if
+	 * it is killed in the meantime.
+	 */
+	r->destroy_session = s;
+	if (r->event != NULL)
+		bufferevent_disable(r->event, EV_READ|EV_WRITE);
+	event_once(-1, EV_TIMEOUT, remote_destroy_session_cb, r, NULL);
 }
 
 /* Create a local window for a remote window. */
@@ -1210,7 +1305,17 @@ remote_job_complete(struct job *job)
 	r->event = NULL;
 	remote_fail_wait(r, r->error != NULL ? r->error :
 	    "control connection exited");
-	remote_free(r);
+
+	/*
+	 * Freeing the remote destroys the mirror session, which must not be
+	 * done from inside a job callback; defer it to the event loop. If a
+	 * destruction or a free is already scheduled, it will finish tearing
+	 * the remote down when it runs, so do not schedule anything else.
+	 */
+	if (r->destroy_session != NULL || r->free_pending)
+		return;
+	r->free_pending = 1;
+	event_once(-1, EV_TIMEOUT, remote_free_cb, r, NULL);
 }
 
 /* Read one protocol line. */
@@ -1415,7 +1520,7 @@ remote_session_changed(struct remote *r, u_int id, char *name)
 	free(r->remote_name);
 	r->remote_name = xstrdup(name);
 
-	remote_reset(r);
+	remote_reset(r, 0);
 	if (!r->name_locked) {
 		free(r->session_name);
 		r->session_name = xstrdup(name);
@@ -1516,7 +1621,7 @@ remote_window_close(struct remote *r, u_int id)
 	if (s != NULL && rw->wl != NULL) {
 		if (session_detach(s, rw->wl) == 1) {
 			/* Last window: destroy the whole mirror session. */
-			remote_destroy_session(r);
+			remote_destroy_session(r, 1);
 		} else
 			server_redraw_session_group(s);
 	}
@@ -1609,7 +1714,7 @@ remote_exit(struct remote *r)
 
 /* Clear local state (but keep the remote connection). */
 static void
-remote_reset(struct remote *r)
+remote_reset(struct remote *r, int fail_wait)
 {
 	struct remote_query	*q;
 	struct remote_early	*re;
@@ -1624,7 +1729,7 @@ remote_reset(struct remote *r)
 		free(re);
 	}
 	evbuffer_drain(r->reply, EV_SIZE_MAX);
-	remote_destroy_session(r);
+	remote_destroy_session(r, fail_wait);
 }
 
 /* Free a remote after its local session has gone away. */
@@ -1632,6 +1737,17 @@ static void
 remote_free_cb(__unused int fd, __unused short events, void *arg)
 {
 	struct remote	*r = arg;
+
+	r->free_pending = 0;
+
+	/*
+	 * The session is normally already gone, but if the control connection
+	 * died without the remote session being closed it is still here:
+	 * destroy it now, from the event loop, where it is safe to detach
+	 * clients.
+	 */
+	if (r->session != NULL)
+		remote_destroy_session_now(r);
 
 	if (r->job != NULL) {
 		job_free(r->job);
@@ -1673,6 +1789,16 @@ remote_session_destroyed(struct session *s)
 	 */
 	if (r->event != NULL)
 		bufferevent_disable(r->event, EV_READ|EV_WRITE);
+	if (r->destroy_session != NULL || r->free_pending) {
+		/*
+		 * A deferred destruction is already scheduled, or the remote
+		 * is already waiting to be freed; it will finish tearing the
+		 * remote down when it runs.
+		 */
+		r->free_pending = 1;
+		return;
+	}
+	r->free_pending = 1;
 	event_once(-1, EV_TIMEOUT, remote_free_cb, r, NULL);
 }
 
@@ -1681,7 +1807,16 @@ static void
 remote_free(struct remote *r)
 {
 	remote_log(r, "free");
-	remote_reset(r);
+
+	/*
+	 * The session is normally already destroyed by the callback running
+	 * this, but if it is still here destroy it now rather than leaving
+	 * anything scheduled: this remote is about to be freed.
+	 */
+	if (r->session != NULL)
+		remote_destroy_session_now(r);
+
+	remote_reset(r, 1);
 	free(r->session_name);
 	free(r->remote_name);
 	free(r->host);
