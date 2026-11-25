@@ -344,6 +344,7 @@ server_client_apply_resize(struct client *c, u_int old_sx, u_int old_sy)
 {
 	if (c->session != NULL) {
 		recalculate_sizes();
+		remote_client_resized(c);
 		server_redraw_client(c);
 		server_client_fire_resized(c, old_sx, old_sy);
 	}
@@ -391,6 +392,7 @@ server_client_set_session(struct client *c, struct session *s)
 	if (s != NULL) {
 		s->curw->window->latest = c;
 		recalculate_sizes();
+		remote_client_resized(c);
 		window_update_focus(s->curw->window);
 		session_update_activity(s, NULL);
 		session_theme_changed(s);
