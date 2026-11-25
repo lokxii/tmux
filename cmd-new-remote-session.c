@@ -436,7 +436,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct args		*args = cmd_get_args(self);
 	struct cmd_find_state	 fs;
 	struct client		*c = cmdq_get_client(item);
-	struct session		*s;
+	struct session		*s, *loop;
 	struct window_pane	*wp;
 	struct environ_entry	*ee;
 	struct remote_entry	*entry;
@@ -447,6 +447,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	const char		*runtime;
 	char			*command = NULL, *helper = NULL;
 	char			*escaped, *tmp, *rhost = NULL, *p;
+	char			*rname = NULL, *rport = NULL;
 	char			**argv = NULL, **rargv = NULL;
 	int			 argc = 0, rargc = 0;
 	int			 offset = 0, inside = 0, force, detached;
@@ -541,14 +542,58 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	xasprintf(&ctl, "%s/tmux-remote-%u/%s.sock", runtime,
 	    (u_int)getuid(), token);
 
-	s = session_find(name);
-	if (s != NULL) {
-		rhost = remote_session_option(s, "@remote_host");
-		if (rhost != NULL && strcmp(rhost, host) != 0) {
-			cmdq_error(item, "session %s is remote to %s", name,
-			    rhost);
+	/*
+	 * Look for an existing mirror of the requested remote session by
+	 * identity (host, remote session name and port) rather than by
+	 * local name: the requested name may be held by an unrelated plain
+	 * local session, and the mirror itself may have been renamed (for
+	 * example to name-1) if a plain session held the name when it was
+	 * created. Mirrors record their identity in the @remote_host,
+	 * @remote_session and @remote_port options.
+	 */
+	s = NULL;
+	RB_FOREACH(loop, sessions, &sessions) {
+		rhost = remote_session_option(loop, "@remote_host");
+		if (rhost == NULL)
+			continue;
+		rname = remote_session_option(loop, "@remote_session");
+		rport = remote_session_option(loop, "@remote_port");
+
+		/*
+		 * Compare ports with an unset port treated as the ssh
+		 * default of 22 on both sides: a mirror created without -p
+		 * and a command run with -p 22 (or vice versa) are the same
+		 * remote, while an explicit different port is not. Ports
+		 * are normalized decimal strings on both sides, so a plain
+		 * strcmp is enough.
+		 */
+		if (rname != NULL && strcmp(rhost, host) == 0 &&
+		    strcmp(rname, name) == 0 &&
+		    strcmp(rport == NULL ? "22" : rport,
+		    port == NULL ? "22" : port) == 0) {
+			s = loop;
+		} else if (strcmp(loop->name, name) == 0) {
+			/*
+			 * A mirror holding the requested local name belongs
+			 * to a different remote: refuse rather than
+			 * silently reusing or duplicating it.
+			 */
+			cmdq_error(item, "session %s is remote to %s port %s",
+			    name, rhost, rport == NULL ? "22" : rport);
+			free(rhost);
+			free(rname);
+			free(rport);
+			rhost = rname = rport = NULL;
 			goto fail;
 		}
+		free(rhost);
+		free(rname);
+		free(rport);
+		rhost = rname = rport = NULL;
+		if (s != NULL)
+			break;
+	}
+	if (s != NULL) {
 		if (!detached) {
 			remote_queue(item, inside ? "switch-client -t $%u" :
 			    "attach-session -t $%u", s->id);
@@ -576,6 +621,8 @@ done:
 	free(command);
 	free(helper);
 	free(rhost);
+	free(rname);
+	free(rport);
 	cmd_free_argv(argc, argv);
 	cmd_free_argv(rargc, rargv);
 	return (retval);
@@ -589,6 +636,8 @@ fail:
 	free(command);
 	free(helper);
 	free(rhost);
+	free(rname);
+	free(rport);
 	cmd_free_argv(argc, argv);
 	cmd_free_argv(rargc, rargv);
 	return (CMD_RETURN_ERROR);
