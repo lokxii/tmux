@@ -3817,7 +3817,7 @@ const char *screen_print(struct screen *, int);
 /* remote.c */
 struct remote	*remote_start(const char *, const char *, const char *,
 		     const char *, const char *, struct cmdq_item *,
-		     struct client *, int, int);
+		     struct client *, int, int, int);
 struct remote	*remote_find_by_session(struct session *);
 void		 remote_client_resized(struct client *);
 void		 remote_session_destroyed(struct session *);

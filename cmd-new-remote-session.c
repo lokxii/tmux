@@ -605,7 +605,8 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	command = remote_build_command(token, name, rargc, rargv);
 	helper = remote_build_helper(host, port, ctl, token, key, command);
 	if (remote_start(helper, name, host, port, token,
-	    c != NULL ? item : NULL, c, inside, detached) == NULL) {
+	    c != NULL ? item : NULL, c, inside, detached,
+	    args_has(args, 's')) == NULL) {
 		cmdq_error(item, "cannot start remote session");
 		goto fail;
 	}

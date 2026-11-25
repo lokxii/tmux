@@ -1487,11 +1487,28 @@ is used all positional arguments are part of
 Flags must precede the positional host.
 .Pp
 .Fl s
-selects the session name.
+selects the remote session name.
+The local mirror session is named
+.Ar host Ns ~ Ns Ar name ,
+with the host sanitized so that
+.Ql \&.
+and
+.Ql \&:
+become
+.Ql _ ;
+this makes mirrors of the same remote session name on different hosts
+distinguishable.
 Dots and colons in the name are replaced with underscores, because tmux treats
 them as window and pane separators in
 .Fl t
 targets, including the target used to attach the mirror.
+Without
+.Fl s
+the default
+.Ar remote\-host
+name is used for both the remote and local session.
+Reuse and attach use the remote identity rather than the local name, so the
+prefix does not affect them.
 .Pp
 .Fl i
 selects the SSH private key file, equivalent to

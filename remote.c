@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -114,6 +115,7 @@ struct remote {
 	char			*token;
 	char			*error;
 	int			 name_locked;
+	int			 prefix_host;
 	u_int			 session_id;
 	int			 booting;
 	int			 booted;
@@ -210,6 +212,47 @@ remote_log(struct remote *r, const char *fmt, ...)
 	va_end(ap);
 	log_debug("remote #%u: %s", r->id, msg);
 	free(msg);
+}
+
+/*
+ * Build the local mirror session name: the remote session name prefixed with
+ * the sanitized remote host. The prefix distinguishes mirrors of the same
+ * remote session name on different hosts in the local session list. The host
+ * is sanitized because tmux treats '.' and ':' as window and pane separators
+ * in -t targets.
+ */
+static char *
+remote_local_name(struct remote *r, const char *name)
+{
+	const char	*p;
+	char		*out, *q;
+
+	if (r->host == NULL)
+		return (xstrdup(name));
+
+	p = strrchr(r->host, '@');
+	if (p != NULL)
+		p++;
+	else
+		p = r->host;
+
+	out = xmalloc(strlen(p) + strlen(name) + 2);
+	q = out;
+	for (; *p != '\0'; p++) {
+		if (isalnum((unsigned char)*p) || *p == '-' || *p == '_')
+			*q++ = *p;
+		else if (*p == ':' || *p == '[' || *p == ']')
+			continue;
+		else
+			*q++ = '_';
+	}
+	if (q == out) {
+		free(out);
+		return (xstrdup(name));
+	}
+	*q++ = '~';
+	memcpy(q, name, strlen(name) + 1);
+	return (out);
 }
 
 /* Compare remote windows by id. */
@@ -464,6 +507,8 @@ remote_create_session(struct remote *r)
 		return;
 	if (r->session_name == NULL)
 		base = xstrdup("remote");
+	else if (r->prefix_host && r->host != NULL)
+		base = remote_local_name(r, r->session_name);
 	else
 		base = xstrdup(r->session_name);
 
@@ -1385,7 +1430,7 @@ struct remote *
 remote_start(const char *remote_command, const char *session_name,
     const char *host, const char *port, const char *token,
     struct cmdq_item *wait_item, struct client *wait_client, int wait_inside,
-    int wait_detached)
+    int wait_detached, int prefix_host)
 {
 	struct remote	*r;
 	struct timeval	 tv;
@@ -1404,6 +1449,7 @@ remote_start(const char *remote_command, const char *session_name,
 		r->session_name = xstrdup(session_name);
 		r->name_locked = 1;
 	}
+	r->prefix_host = prefix_host;
 	if (host != NULL)
 		r->host = xstrdup(host);
 	if (port != NULL)

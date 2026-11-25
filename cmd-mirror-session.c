@@ -59,7 +59,8 @@ cmd_mirror_session_exec(__unused struct cmd *self, struct cmdq_item *item)
 		return (CMD_RETURN_ERROR);
 	}
 
-	if (remote_start(command, name, NULL, NULL, NULL, NULL, NULL, 0, 0) == NULL) {
+	if (remote_start(command, name, NULL, NULL, NULL, NULL, NULL, 0, 0,
+	    0) == NULL) {
 		cmdq_error(item, "cannot start remote: %s", command);
 		free(command);
 		return (CMD_RETURN_ERROR);

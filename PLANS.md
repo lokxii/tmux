@@ -62,6 +62,12 @@ new-remote-session [-AdDEPRX] [-c start-directory] [-e environment]
 - Session names are normalized: `.` and `:` become `_`, because tmux treats
   them as window/pane separators in `-t` targets (the default name derived
   from a host such as an IP address would otherwise be unattachable).
+- With `-s` the remote session keeps the given name, while the local mirror
+  session is named `<host>~<name>` with the host sanitized the same way (the
+  part after any `@`, keeping alphanumerics, `-` and `_`). The prefix tells
+  mirrors of the same remote session name on different hosts apart.
+- Without `-s` the default `remote-<host>` name is used for both the remote
+  and local session.
 - Remote creation forwards `new-session` options (`-c`, `-e`, `-E`, `-F`,
   `-f`, `-n`, `-P`, `-t`, `-x`, `-X`, `-y`, and the shell command).
 - `-d` starts the mirror without attaching/switching the client.
