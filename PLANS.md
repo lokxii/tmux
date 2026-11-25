@@ -28,7 +28,7 @@ local tmux server
 
 The local server parses the control-mode protocol from the SSH child. Remote
 `%output` is decoded and fed to local pane terminal parsers. Local input is
-encoded and sent back with `send-keys -t %remote -lH`. Window/layout/session
+encoded and sent back with `send-keys -t %remote -H`. Window/layout/session
 notifications update the local mirror.
 
 The remote host needs only standard, non-forked tmux.
@@ -69,7 +69,10 @@ new-remote-session [-AdDEPRX] [-c start-directory] [-e environment]
 The remote session is created detached on a private tmux socket and then
 attached with `tmux -C`. The random token is stable per host/port/name for the
 lifetime of the local tmux server, so later invocations reuse the same remote
-socket, cache, and SSH ControlMaster.
+socket, cache, and SSH ControlMaster. An existing mirror is found by its
+`@remote_host`/`@remote_session`/`@remote_port` identity, not by local session
+name: a same-named plain local session does not hijack the attach, and
+mirrors are not duplicated.
 
 ## Command routing
 
@@ -79,10 +82,21 @@ The local mirror is the UI, but commands are routed by semantics:
   `attach-session`, `detach-client`, `switch-client`, `list-sessions`, local
   options/keys, etc.).
 - **Remote:** window/pane/layout commands (`new-window`, `split-window`,
-  `select-*`, `resize-*`, `swap-*`, layouts, copy-mode, etc.).
+  `select-*`, `resize-*`, `swap-*`, `respawn-*`, layouts, etc.).
 - Explicit local targets are translated to remote `@window` / `%pane` IDs for
-  the supported targeted commands. Unsupported targeted forms are rejected
-  rather than silently desynchronizing the mirror.
+  the supported targeted commands; `new-pane -t` is translated exactly like
+  `split-window -t`, and `next-window`/`previous-window`/`last-window` with
+  `-t` are translated to the remote session id. Unsupported targeted forms
+  are rejected rather than silently desynchronizing the mirror; commands with
+  `-s` source targets (`join-pane`, `link-window`, `move-window`,
+  `move-pane`, `swap-pane`, `swap-window`) are rejected because source
+  targets are not translated.
+
+The attached client's terminal size is advertised to the remote with
+`refresh-client -C` on attach and on resize, so the remote window follows the
+local mirror window. Connecting and bootstrap time out after 60 seconds: a
+stalled control connection fails the waiting `new-remote-session` command
+instead of hanging forever.
 
 There is no dedicated remote leader key. The normal tmux prefix and command
 prompt work; for example `prefix c` creates a remote window and
@@ -114,7 +128,7 @@ contents are not yet seeded (see limitations); live `%output` is rendered.
 
 - Remote `%output`: unvis-decode, then `input_parse_buffer()`.
 - Local input: `input_key()` encodes using the mirror pane's screen modes;
-  bytes are batched as `send-keys -t %remote -lH <hex...>`.
+  bytes are batched as `send-keys -t %remote -H <hex...>`.
 - Local paste follows the same path through the pane event pair.
 
 ## SSH/config inheritance
@@ -136,7 +150,9 @@ even when the remote user already has a default tmux server running.
 
 - Local detach leaves the control connection running.
 - The ControlMaster remains available for a later invocation.
-- Remote `%exit`/EOF frees the mirror and destroys the local mirror session.
+- Remote `%exit`/EOF frees the mirror; the local mirror session is destroyed
+  through the safe destroy path, so attached clients are cleanly detached
+  instead of the local server crashing.
 - Killing the local mirror session stops the control connection and frees the
   mirror; the other local sessions are unaffected.
 - A later invocation recreates the mirror and reuses the private remote
@@ -158,10 +174,14 @@ even when the remote user already has a default tmux server running.
   replayed. `capture-pane` seeding is the next fidelity item.
 - Mouse, images, OSC clipboard/passthrough, and `%extended-output` flow
   control are not implemented.
-- Interactive remote modes (`choose-tree`, `copy-mode` UI) are not forwarded
-  to the control stream; only server-side window/pane commands are routed.
-- Targeted routing covers common window/pane commands; other targeted forms
-  are rejected.
-- Floating panes and remote window index moves are not fully mirrored.
+- Remote window index moves are not fully mirrored.
+- Commands with `-s` source targets (`join-pane`, `link-window`,
+  `move-window`, `move-pane`, `swap-pane`, `swap-window`) are rejected;
+  source targets are not translated.
+- The remote private tmux server, the copied configuration under
+  `~/.cache/tmux-remote/<token>` on the remote host, and the local SSH
+  ControlMaster persist after the mirror closes until explicitly killed, and
+  the copied configuration may contain sensitive material. This is a
+  documented trade-off of the private-server design.
 - The remote mirror uses local tmux options/status; remote-only configuration
   differences are not mirrored back.

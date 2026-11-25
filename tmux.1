@@ -1506,7 +1506,22 @@ When run from a pane inside tmux, the invoking client switches to the mirrored
 session, leaving its original session untouched.
 The local tmux server is the only UI: remote windows and panes are mirrored
 into local windows and panes, so the local status line is the only status bar
-and the normal tmux prefix, key bindings, copy mode and command prompt work.
+and the normal tmux prefix, key bindings and command prompt work.
+Remote interactive modes cannot be driven through the control stream, so
+.Ic copy\-mode ,
+.Ic clock\-mode
+and
+.Ic display\-panes
+run as local overlays on the mirrored screen; in particular, scrolling the
+mirror uses the local copy mode, which reads the mirror's local scrollback.
+.Pp
+The size of the attached client's terminal is advertised to the remote tmux
+server with
+.Ql refresh\-client \-C
+when the mirror is attached and whenever the local terminal is resized, so the
+remote window follows the local terminal.
+Connecting and bootstrap time out after 60 seconds: if the remote server does
+not respond, the waiting command fails instead of hanging forever.
 .Pp
 Commands are routed by name and target.
 Session, client and local-server commands such as
@@ -1527,6 +1542,9 @@ remote tmux server; the resulting state is mirrored back into the local
 session.
 Explicit targets are translated from local mirror IDs to remote IDs where
 supported.
+.Pp
+The initial contents of an existing remote session are not re\-seeded: only
+output produced after the control attach is shown.
 .Pp
 The mirror uses a private remote tmux server on a random socket.
 The local
@@ -1551,6 +1569,13 @@ Remote tmux is started with
 so it does not depend on the remote host having a
 .Ql tmux\-256color
 terminfo entry.
+.Pp
+The remote private tmux server, the configuration copied under
+.Pa ~/.cache/tmux\-remote/ Ns Ar token
+on the remote host and the local SSH control master persist after the mirror
+closes until they are explicitly killed.
+The copied configuration may contain sensitive material and is left in place
+on the remote host.
 .Pp
 The local session is marked with the
 .Ic @remote_host ,
