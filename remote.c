@@ -26,6 +26,14 @@
 
 #include "tmux.h"
 
+/*
+ * Field separator for list-windows and list-panes replies. Do not use a tab:
+ * control clients without a UTF-8 locale have command output passed through
+ * utf8_sanitize(), which replaces every control character with '_'. Window
+ * names are always the last field so they may contain the separator.
+ */
+#define REMOTE_FIELD_SEP "|"
+
 /* Pane ID mapping. */
 struct remote_pane {
 	u_int			 id;		/* remote pane id (%N) */
@@ -137,6 +145,8 @@ static void	remote_bootstrap_panes(struct remote *,
 		    struct remote_query *);
 static void	remote_bootstrap_error(struct remote *,
 		    struct remote_query *);
+static void	remote_attach(struct remote *);
+static void	remote_fail_wait(struct remote *, const char *);
 static void	remote_job_update(struct job *);
 static void	remote_job_complete(struct job *);
 
@@ -758,7 +768,10 @@ remote_layout_size(const char *layout, u_int *sx, u_int *sy)
 	*sy = 24;
 }
 
-/* Parse a tab-separated list-windows line. */
+/*
+ * Parse a list-windows line: id|index|layout|active|name. The name is the
+ * final field and may contain the separator.
+ */
 static void
 remote_parse_window_line(struct remote *r, char *line)
 {
@@ -767,22 +780,22 @@ remote_parse_window_line(struct remote *r, char *line)
 	u_int			 id, idx, active;
 	char			*name, *layout;
 
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	if (field == NULL || field[0] != '@')
 		return;
 	id = strtoul(field + 1, NULL, 10);
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	if (field == NULL)
 		return;
 	idx = strtoul(field, NULL, 10);
-	name = strsep(&iter, "\t");
-	if (name == NULL)
-		return;
-	layout = strsep(&iter, "\t");
+	layout = strsep(&iter, REMOTE_FIELD_SEP);
 	if (layout == NULL)
 		return;
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	active = field != NULL ? strtoul(field, NULL, 10) : 0;
+	name = strsep(&iter, REMOTE_FIELD_SEP);
+	if (name == NULL)
+		return;
 
 	rw = remote_window_get(r, id, 1);
 	rw->idx = idx;
@@ -792,15 +805,11 @@ remote_parse_window_line(struct remote *r, char *line)
 	free(rw->name);
 	rw->name = xstrdup(name);
 
-	if (rw->w == NULL && r->session != NULL)
-		remote_create_local_window(r, rw);
-	else if (rw->w != NULL) {
-		if (rw->name != NULL)
-			window_set_name(rw->w, rw->name, 0);
-	}
+	if (rw->w != NULL)
+		window_set_name(rw->w, rw->name, 0);
 }
 
-/* Parse a tab-separated list-panes line. */
+/* Parse a list-panes line: window|pane|index|active|... */
 static void
 remote_parse_pane_line(struct remote *r, char *line)
 {
@@ -809,29 +818,41 @@ remote_parse_pane_line(struct remote *r, char *line)
 	struct remote_pane	*rp;
 	u_int			 wid, id, idx, active, cx, cy, hlimit;
 
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	if (field == NULL || field[0] != '@')
 		return;
 	wid = strtoul(field + 1, NULL, 10);
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	if (field == NULL || field[0] != '%')
 		return;
 	id = strtoul(field + 1, NULL, 10);
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	if (field == NULL)
 		return;
 	idx = strtoul(field, NULL, 10);
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	active = field != NULL ? strtoul(field, NULL, 10) : 0;
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	cx = field != NULL ? strtoul(field, NULL, 10) : 0;
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	cy = field != NULL ? strtoul(field, NULL, 10) : 0;
-	field = strsep(&iter, "\t");
+	field = strsep(&iter, REMOTE_FIELD_SEP);
 	hlimit = field != NULL ? strtoul(field, NULL, 10) : 2000;
 
 	rw = remote_window_get(r, wid, 0);
-	if (rw == NULL || rw->w == NULL)
+	if (rw == NULL)
+		return;
+
+	/*
+	 * Create the local window together with its first pane. A local
+	 * window with no panes is not a valid tmux window.
+	 */
+	if (rw->w == NULL) {
+		if (r->session == NULL)
+			remote_create_session(r);
+		remote_create_local_window(r, rw);
+	}
+	if (rw->w == NULL)
 		return;
 	rw->seen = 1;
 
@@ -977,19 +998,29 @@ remote_bootstrap_windows(struct remote *r, struct remote_query *q)
 	char			*line;
 	u_int			 sid = q->window_id;
 
-	remote_create_session(r);
+	/*
+	 * Record the remote windows first. The local session is created when
+	 * the first local window is created, so it never exists without a
+	 * window (which would make targets on it crash).
+	 */
 	while ((line = evbuffer_readln(r->reply, NULL,
 	    EVBUFFER_EOL_LF)) != NULL) {
 		remote_parse_window_line(r, line);
 		free(line);
 	}
+	if (RB_EMPTY(&r->windows)) {
+		remote_log(r, "no remote windows");
+		remote_fail_wait(r, "no windows in remote session");
+		return;
+	}
 
 	q2 = remote_query_new(remote_bootstrap_panes, remote_bootstrap_error);
 	q2->window_id = sid;
-	remote_run(r, q2, "list-panes -s -t $%u -F \"#{window_id}\\t"
-	    "#{pane_id}\\t#{pane_index}\\t#{pane_active}\\t#{cursor_x}\\t"
-	    "#{cursor_y}\\t#{history_limit}\\t#{window_width}\\t"
-	    "#{window_height}\"", sid);
+	remote_run(r, q2, "list-panes -s -t $%u -F \"#{window_id}" REMOTE_FIELD_SEP
+	    "#{pane_id}" REMOTE_FIELD_SEP "#{pane_index}" REMOTE_FIELD_SEP
+	    "#{pane_active}" REMOTE_FIELD_SEP "#{cursor_x}" REMOTE_FIELD_SEP
+	    "#{cursor_y}" REMOTE_FIELD_SEP "#{history_limit}" REMOTE_FIELD_SEP
+	    "#{window_width}" REMOTE_FIELD_SEP "#{window_height}\"", sid);
 }
 
 
@@ -1062,6 +1093,11 @@ remote_bootstrap_panes(struct remote *r, __unused struct remote_query *q)
 		remote_parse_pane_line(r, line);
 		free(line);
 	}
+	if (r->session == NULL) {
+		remote_log(r, "no remote panes");
+		remote_fail_wait(r, "no panes in remote session");
+		return;
+	}
 
 	RB_FOREACH_SAFE(rw, remote_windows, &r->windows, rw1) {
 		if (!rw->seen && rw->w != NULL) {
@@ -1087,6 +1123,7 @@ remote_bootstrap_error(struct remote *r, struct remote_query *q)
 	remote_log(r, "command failed: %s: %s", q->command,
 	    line == NULL ? "unknown error" : line);
 	free(line);
+	remote_fail_wait(r, "remote bootstrap failed");
 }
 
 /* Start mirroring a new remote control stream. */
@@ -1376,9 +1413,9 @@ remote_session_changed(struct remote *r, u_int id, char *name)
 
 	q = remote_query_new(remote_bootstrap_windows, remote_bootstrap_error);
 	q->window_id = id;
-	remote_run(r, q, "list-windows -t $%u -F \"#{window_id}\\t"
-	    "#{window_index}\\t#{window_name}\\t#{window_layout}\\t"
-	    "#{window_active}\"", id);
+	remote_run(r, q, "list-windows -t $%u -F \"#{window_id}" REMOTE_FIELD_SEP
+	    "#{window_index}" REMOTE_FIELD_SEP "#{window_layout}" REMOTE_FIELD_SEP
+	    "#{window_active}" REMOTE_FIELD_SEP "#{window_name}\"", id);
 }
 
 /* Remote window was added. */
@@ -1392,9 +1429,9 @@ remote_window_add(struct remote *r, u_int id)
 
 	q = remote_query_new(remote_window_add_done, remote_bootstrap_error);
 	q->window_id = id;
-	remote_run(r, q, "list-windows -t @%u -F \"#{window_id}\\t"
-	    "#{window_index}\\t#{window_name}\\t#{window_layout}\\t"
-	    "#{window_active}\"", id);
+	remote_run(r, q, "list-windows -t @%u -F \"#{window_id}" REMOTE_FIELD_SEP
+	    "#{window_index}" REMOTE_FIELD_SEP "#{window_layout}" REMOTE_FIELD_SEP
+	    "#{window_active}" REMOTE_FIELD_SEP "#{window_name}\"", id);
 }
 
 static void
@@ -1405,22 +1442,22 @@ remote_window_add_done(struct remote *r, struct remote_query *q)
 	char			*line;
 	u_int			 id = q->window_id;
 
-	if (r->session == NULL)
-		remote_create_session(r);
 	while ((line = evbuffer_readln(r->reply, NULL,
 	    EVBUFFER_EOL_LF)) != NULL) {
 		remote_parse_window_line(r, line);
 		free(line);
 	}
 	rw = remote_window_get(r, id, 0);
-	if (rw == NULL || rw->w == NULL)
+	if (rw == NULL)
 		return;
 
 	q2 = remote_query_new(remote_window_panes_done, remote_bootstrap_error);
 	q2->window_id = id;
-	remote_run(r, q2, "list-panes -t @%u -F \"#{window_id}\\t#{pane_id}\\t"
-	    "#{pane_index}\\t#{pane_active}\\t#{cursor_x}\\t#{cursor_y}\\t"
-	    "#{history_limit}\\t#{window_width}\\t#{window_height}\"", id);
+	remote_run(r, q2, "list-panes -t @%u -F \"#{window_id}" REMOTE_FIELD_SEP
+	    "#{pane_id}" REMOTE_FIELD_SEP "#{pane_index}" REMOTE_FIELD_SEP
+	    "#{pane_active}" REMOTE_FIELD_SEP "#{cursor_x}" REMOTE_FIELD_SEP
+	    "#{cursor_y}" REMOTE_FIELD_SEP "#{history_limit}" REMOTE_FIELD_SEP
+	    "#{window_width}" REMOTE_FIELD_SEP "#{window_height}\"", id);
 }
 
 static void
@@ -1542,9 +1579,11 @@ remote_layout_change(struct remote *r, u_int id, char *layout)
 
 	q = remote_query_new(remote_window_panes_done, remote_bootstrap_error);
 	q->window_id = id;
-	remote_run(r, q, "list-panes -t @%u -F \"#{window_id}\\t#{pane_id}\\t"
-	    "#{pane_index}\\t#{pane_active}\\t#{cursor_x}\\t#{cursor_y}\\t"
-	    "#{history_limit}\\t#{window_width}\\t#{window_height}\"", id);
+	remote_run(r, q, "list-panes -t @%u -F \"#{window_id}" REMOTE_FIELD_SEP
+	    "#{pane_id}" REMOTE_FIELD_SEP "#{pane_index}" REMOTE_FIELD_SEP
+	    "#{pane_active}" REMOTE_FIELD_SEP "#{cursor_x}" REMOTE_FIELD_SEP
+	    "#{cursor_y}" REMOTE_FIELD_SEP "#{history_limit}" REMOTE_FIELD_SEP
+	    "#{window_width}" REMOTE_FIELD_SEP "#{window_height}\"", id);
 }
 
 /* Remote requested exit. */
@@ -1573,6 +1612,55 @@ remote_reset(struct remote *r)
 	}
 	evbuffer_drain(r->reply, EV_SIZE_MAX);
 	remote_destroy_session(r);
+}
+
+/* Free a remote after its local session has gone away. */
+static void
+remote_free_cb(__unused int fd, __unused short events, void *arg)
+{
+	struct remote	*r = arg;
+
+	if (r->job != NULL) {
+		job_free(r->job);
+		r->job = NULL;
+	}
+	r->event = NULL;
+	remote_free(r);
+}
+
+/*
+ * The local mirror session is being destroyed, either by the user or because
+ * the remote side went away. Stop the control connection and free the remote
+ * once the session's windows and panes have been torn down.
+ */
+void
+remote_session_destroyed(struct session *s)
+{
+	struct remote	*r;
+
+	TAILQ_FOREACH(r, &remotes, entry) {
+		if (r->session == s)
+			break;
+	}
+	if (r == NULL)
+		return;
+	log_debug("remote #%u: local session destroyed", r->id);
+	remote_fail_wait(r, "local mirror session destroyed");
+	r->session = NULL;
+	r->session_id = 0;
+	r->booted = 0;
+	r->booting = 0;
+	r->wait_item = NULL;
+	r->wait_client = NULL;
+
+	/*
+	 * Stop processing the control stream now and tear the connection down
+	 * from the event loop, because this may be called from inside a job
+	 * read callback or while the session's panes are still being removed.
+	 */
+	if (r->event != NULL)
+		bufferevent_disable(r->event, EV_READ|EV_WRITE);
+	event_once(-1, EV_TIMEOUT, remote_free_cb, r, NULL);
 }
 
 /* Free a remote and its local session. */

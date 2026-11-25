@@ -90,15 +90,22 @@ prompt work; for example `prefix c` creates a remote window and
 On `%session-changed` the mirror sends:
 
 ```text
-refresh-client -f new-layouts
 list-windows -t $session -F ...
 list-panes -s -t $session -F ...
 ```
 
+Replies use a printable `|` field separator rather than tabs. Control clients
+without a UTF-8 locale (the usual case for a non-interactive SSH session) have
+command output passed through `utf8_sanitize()`, which turns every control
+character, including tab, into `_`. Window names are the final field so they
+may contain the separator.
+
 Local windows are created with `window_create()`/`winlink_add()`; panes are
 created with `window_add_pane()` and receive a `bufferevent_pair` for input.
-Remote layouts are applied with `layout_parse()`. Initial screen contents are
-not yet seeded (see limitations); live `%output` is rendered.
+A local window is created together with its first pane, and the local session
+is only created once a window exists, so a mirror session always has a current
+window. Remote layouts are applied with `layout_parse()`. Initial screen
+contents are not yet seeded (see limitations); live `%output` is rendered.
 
 ## Input/output
 
@@ -127,6 +134,8 @@ even when the remote user already has a default tmux server running.
 - Local detach leaves the control connection running.
 - The ControlMaster remains available for a later invocation.
 - Remote `%exit`/EOF frees the mirror and destroys the local mirror session.
+- Killing the local mirror session stops the control connection and frees the
+  mirror; the other local sessions are unaffected.
 - A later invocation recreates the mirror and reuses the private remote
   server if it still exists.
 
@@ -136,9 +145,9 @@ even when the remote user already has a default tmux server running.
   window events using two local tmux servers, no SSH.
 - `regress/new-remote-session.sh` validates the full local command with a fake
   ssh that executes the remote control command locally.
-- ASAN runs of both pass.
-- `regress/remote-ssh/` remains the real-SSH harness; it needs updating for
-  control mode where it still assumes the old pty proxy.
+- `regress/remote-ssh/run-mirror.sh` validates the same flow over real SSH,
+  including config/plugin inheritance and command routing.
+- ASAN runs of all three pass.
 
 ## Known limitations
 

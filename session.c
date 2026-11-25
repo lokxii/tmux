@@ -205,6 +205,7 @@ session_destroy(struct session *s, int notify, const char *from)
 	s->curw = NULL;
 
 	RB_REMOVE(sessions, &sessions, s);
+	remote_session_destroyed(s);
 	if (notify)
 		events_fire_session("session-closed", s);
 

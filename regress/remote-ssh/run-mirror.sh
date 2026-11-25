@@ -145,9 +145,16 @@ while ! "$TMUX_BIN" -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; do
 		fail "mirror session did not appear"
 		echo "INFO: local sessions:" >&2
 		"$TMUX_BIN" -L "$SOCK" list-sessions 2>&1 >&2 || :
-		echo "INFO: remote mirror log:" >&2
-		grep -h "remote #" "$ROOT"/tmux-server-*.log 2>/dev/null |
-		    tail -40 >&2 || :
+		for log in "$ROOT"/tmux-server-*.log; do
+			[ -f "$log" ] || continue
+			echo "INFO: full tail of $log:" >&2
+			tail -120 "$log" >&2
+		done
+		for log in "$ROOT"/tmux-client-*.log; do
+			[ -f "$log" ] || continue
+			echo "INFO: full tail of $log:" >&2
+			tail -40 "$log" >&2
+		done
 		exit 1
 	fi
 	sleep 0.1
