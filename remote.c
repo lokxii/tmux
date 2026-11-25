@@ -700,6 +700,13 @@ remote_find_by_session(struct session *s)
 {
 	struct remote	*r;
 
+	/*
+	 * A NULL session means the command has no target session; never
+	 * match a remote which is still booting or pending free (whose
+	 * r->session is also NULL).
+	 */
+	if (s == NULL)
+		return (NULL);
 	TAILQ_FOREACH(r, &remotes, entry) {
 		if (r->session == s)
 			return (r);
@@ -793,13 +800,23 @@ remote_rewrite_target(struct cmd *cmd, const char *target)
 static int
 remote_command_is_forwarded(const char *name)
 {
+	/*
+	 * Overlays such as copy-mode, clock-mode and display-panes are
+	 * excluded: they must run locally on the mirrored pane. Input is
+	 * forwarded as raw bytes (send-keys -H), so a remote copy-mode could
+	 * not be driven (the first byte of an arrow key, 0x1b, would match
+	 * the copy-mode Escape binding), while local copy-mode works and
+	 * provides scrollback. respawn-pane and respawn-window are included:
+	 * a local respawn would overwrite the pane's bufferevent pair and
+	 * intermix a local process with the mirrored stream.
+	 */
 	static const char *names[] = {
-		"break-pane", "clear-history", "clock-mode", "copy-mode",
-		"display-panes", "find-window", "join-pane", "kill-pane",
-		"kill-window", "last-pane", "last-window", "link-window",
-		"move-pane", "move-window", "new-pane", "new-window",
-		"next-layout", "next-window", "previous-layout",
-		"previous-window", "rename-window", "resize-pane",
+		"break-pane", "clear-history", "find-window", "join-pane",
+		"kill-pane", "kill-window", "last-pane", "last-window",
+		"link-window", "move-pane", "move-window", "new-pane",
+		"new-window", "next-layout", "next-window",
+		"previous-layout", "previous-window", "rename-window",
+		"respawn-pane", "respawn-window", "resize-pane",
 		"resize-window", "rotate-window", "select-layout",
 		"select-pane", "select-window", "split-window",
 		"swap-pane", "swap-window", "switch-mode", "unlink-window",
@@ -831,28 +848,53 @@ remote_route_command(struct cmdq_item *item, struct cmd *cmd,
 	r = remote_find_by_session(cmdq_get_target(item)->s);
 	if (r == NULL)
 		return (0);
+
+	/*
+	 * A -s source target was resolved by the user against the local
+	 * mirror model but would execute against the remote model, silently
+	 * operating on the wrong window or pane. Until source targets can be
+	 * rewritten too, reject them.
+	 */
+	if (args_has(args, 's') &&
+	    (strcmp(entry->name, "join-pane") == 0 ||
+	    strcmp(entry->name, "link-window") == 0 ||
+	    strcmp(entry->name, "move-window") == 0 ||
+	    strcmp(entry->name, "move-pane") == 0 ||
+	    strcmp(entry->name, "swap-pane") == 0 ||
+	    strcmp(entry->name, "swap-window") == 0)) {
+		cmdq_error(item, "remote source targets (-s) are not "
+		    "supported yet");
+		return (-1);
+	}
+
 	if (args_has(args, 't')) {
 		struct cmd_find_state	*target = cmdq_get_target(item);
 		char			*remote_target = NULL;
 		u_int			 id;
 
-		if (strcmp(entry->name, "new-window") == 0 &&
+		if ((strcmp(entry->name, "new-window") == 0 ||
+		    strcmp(entry->name, "next-window") == 0 ||
+		    strcmp(entry->name, "previous-window") == 0 ||
+		    strcmp(entry->name, "last-window") == 0) &&
 		    target->s == r->session)
 			xasprintf(&remote_target, "$%u", r->session_id);
-		else if (strcmp(entry->name, "split-window") == 0 &&
+		else if ((strcmp(entry->name, "split-window") == 0 ||
+		    strcmp(entry->name, "new-pane") == 0) &&
 		    target->w != NULL &&
 		    remote_window_id_for(r, target->w, &id) == 0)
 			xasprintf(&remote_target, "@%u", id);
 		else if ((strcmp(entry->name, "select-window") == 0 ||
 		    strcmp(entry->name, "kill-window") == 0 ||
 		    strcmp(entry->name, "rename-window") == 0 ||
-		    strcmp(entry->name, "resize-window") == 0) &&
+		    strcmp(entry->name, "resize-window") == 0 ||
+		    strcmp(entry->name, "respawn-window") == 0) &&
 		    target->w != NULL &&
 		    remote_window_id_for(r, target->w, &id) == 0)
 			xasprintf(&remote_target, "@%u", id);
 		else if ((strcmp(entry->name, "select-pane") == 0 ||
 		    strcmp(entry->name, "kill-pane") == 0 ||
-		    strcmp(entry->name, "resize-pane") == 0) &&
+		    strcmp(entry->name, "resize-pane") == 0 ||
+		    strcmp(entry->name, "respawn-pane") == 0) &&
 		    target->wp != NULL &&
 		    remote_pane_id_for(r, target->wp, &id) == 0)
 			xasprintf(&remote_target, "%%%u", id);
