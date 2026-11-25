@@ -3818,6 +3818,7 @@ struct remote	*remote_start(const char *, const char *, const char *,
 		     const char *, const char *, struct cmdq_item *,
 		     struct client *, int, int);
 struct remote	*remote_find_by_session(struct session *);
+void		 remote_client_resized(struct client *);
 void		 remote_session_destroyed(struct session *);
 int		 remote_route_command(struct cmdq_item *, struct cmd *,
 		     const struct cmd_entry *);

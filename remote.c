@@ -116,6 +116,9 @@ struct remote {
 	int			 wait_detached;
 
 	TAILQ_ENTRY(remote)	 entry;
+
+	u_int			 adv_sx;	/* last size advertised to remote */
+	u_int			 adv_sy;
 };
 static TAILQ_HEAD(remotes, remote) remotes = TAILQ_HEAD_INITIALIZER(remotes);
 static u_int next_remote_id;
@@ -139,6 +142,7 @@ static struct remote_query *remote_query_new(
 		    void (*)(struct remote *, struct remote_query *),
 		    void (*)(struct remote *, struct remote_query *));
 static void	remote_query_free(struct remote_query *);
+static void	remote_advertise_size(struct remote *, u_int, u_int);
 
 static void	remote_bootstrap_windows(struct remote *,
 		    struct remote_query *);
@@ -264,6 +268,32 @@ remote_run(struct remote *r, struct remote_query *q, const char *fmt, ...)
 	} else
 		free(line);
 	return (q);
+}
+
+/* Tell the remote control client our current window size. */
+static void
+remote_advertise_size(struct remote *r, u_int sx, u_int sy)
+{
+	if (r->event == NULL || !r->booted)
+		return;
+	if (sx == r->adv_sx && sy == r->adv_sy)
+		return;
+	r->adv_sx = sx;
+	r->adv_sy = sy;
+	remote_run(r, NULL, "refresh-client -C %ux%u", sx, sy);
+}
+
+/* Get the size a window will have after any pending resize. */
+static void
+remote_window_size(struct window *w, u_int *sx, u_int *sy)
+{
+	if (w->flags & WINDOW_RESIZE) {
+		*sx = w->new_sx;
+		*sy = w->new_sy;
+	} else {
+		*sx = w->sx;
+		*sy = w->sy;
+	}
 }
 
 /* Get a window mapping. */
@@ -580,6 +610,26 @@ remote_find_by_session(struct session *s)
 			return (r);
 	}
 	return (NULL);
+}
+
+/* The client's window may have changed size: advertise it to the remote. */
+void
+remote_client_resized(struct client *c)
+{
+	struct remote	*r;
+	struct window	*w;
+	u_int		 sx, sy;
+
+	if (c == NULL || c->session == NULL)
+		return;
+	r = remote_find_by_session(c->session);
+	if (r == NULL || !r->booted)
+		return;
+	w = c->session->curw != NULL ? c->session->curw->window : NULL;
+	if (w == NULL)
+		return;
+	remote_window_size(w, &sx, &sy);
+	remote_advertise_size(r, sx, sy);
 }
 
 
@@ -974,6 +1024,7 @@ static void
 remote_set_active_window(struct remote *r)
 {
 	struct remote_window	*rw;
+	u_int			 sx, sy;
 
 	if (r->session == NULL)
 		return;
@@ -982,8 +1033,15 @@ remote_set_active_window(struct remote *r)
 			continue;
 		if (rw->active || rw->want_active) {
 			rw->want_active = 0;
-			if (r->session->curw != rw->wl)
+			if (r->session->curw != rw->wl) {
 				session_set_current(r->session, rw->wl);
+				if (r->session->curw != NULL) {
+					remote_window_size(
+					    r->session->curw->window,
+					    &sx, &sy);
+					remote_advertise_size(r, sx, sy);
+				}
+			}
 			break;
 		}
 	}
@@ -1563,6 +1621,7 @@ static void
 remote_session_window_changed(struct remote *r, u_int session_id, u_int id)
 {
 	struct remote_window	*rw;
+	u_int			 sx, sy;
 
 	if (r->session_id != session_id)
 		return;
@@ -1573,8 +1632,13 @@ remote_session_window_changed(struct remote *r, u_int session_id, u_int id)
 		rw->want_active = 1;
 		return;
 	}
-	if (r->session != NULL)
+	if (r->session != NULL) {
 		session_set_current(r->session, rw->wl);
+		if (r->session->curw != NULL) {
+			remote_window_size(r->session->curw->window, &sx, &sy);
+			remote_advertise_size(r, sx, sy);
+		}
+	}
 }
 
 /* Remote layout changed. */
