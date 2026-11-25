@@ -131,8 +131,6 @@ static struct remote_query *remote_query_new(
 		    void (*)(struct remote *, struct remote_query *));
 static void	remote_query_free(struct remote_query *);
 
-static void	remote_bootstrap_refresh(struct remote *,
-		    struct remote_query *);
 static void	remote_bootstrap_windows(struct remote *,
 		    struct remote_query *);
 static void	remote_bootstrap_panes(struct remote *,
@@ -381,7 +379,7 @@ remote_pane_input(struct bufferevent *bev, void *data)
 
 	log_debug("remote #%u: input %zu bytes for %%%u", rp->r->id, n,
 	    rp->id);
-	remote_run(rp->r, NULL, "send-keys -t %%%u -lH %s", rp->id, hex);
+	remote_run(rp->r, NULL, "send-keys -t %%%u -H %s", rp->id, hex);
 	free(hex);
 
 	evbuffer_drain(in, n);
@@ -604,6 +602,37 @@ remote_pane_id_for(struct remote *r, struct window_pane *wp, u_int *id)
 	return (-1);
 }
 
+
+/* Rewrite the -t argument in a command string to a remote target. */
+static char *
+remote_rewrite_target(struct cmd *cmd, const char *target)
+{
+	struct args	*args = cmd_get_args(cmd);
+	const char	*value = args_get(args, 't');
+	char		*escaped, *needle, *line, *new_line, *pos;
+	size_t		 prefix;
+
+	if (value == NULL)
+		return (NULL);
+	escaped = args_escape(value);
+	xasprintf(&needle, "-t %s", escaped);
+	free(escaped);
+
+	line = cmd_print(cmd);
+	pos = strstr(line, needle);
+	if (pos == NULL) {
+		free(line);
+		free(needle);
+		return (NULL);
+	}
+	prefix = (size_t)(pos - line);
+	xasprintf(&new_line, "%.*s-t %s%s", (int)prefix, line, target,
+	    pos + strlen(needle));
+	free(line);
+	free(needle);
+	return (new_line);
+}
+
 /* Commands that operate on the remote window/pane model. */
 static int
 remote_command_is_forwarded(const char *name)
@@ -648,31 +677,38 @@ remote_route_command(struct cmdq_item *item, struct cmd *cmd,
 		return (0);
 	if (args_has(args, 't')) {
 		struct cmd_find_state	*target = cmdq_get_target(item);
+		char			*remote_target = NULL;
 		u_int			 id;
 
-		if ((strcmp(entry->name, "new-window") == 0 &&
-		    target->s == r->session)) {
-			xasprintf(&line, "new-window -t $%u", r->session_id);
-		} else if (strcmp(entry->name, "split-window") == 0 &&
+		if (strcmp(entry->name, "new-window") == 0 &&
+		    target->s == r->session)
+			xasprintf(&remote_target, "$%u", r->session_id);
+		else if (strcmp(entry->name, "split-window") == 0 &&
 		    target->w != NULL &&
-		    remote_window_id_for(r, target->w, &id) == 0) {
-			xasprintf(&line, "split-window -t @%u", id);
-		} else if ((strcmp(entry->name, "select-window") == 0 ||
+		    remote_window_id_for(r, target->w, &id) == 0)
+			xasprintf(&remote_target, "@%u", id);
+		else if ((strcmp(entry->name, "select-window") == 0 ||
 		    strcmp(entry->name, "kill-window") == 0 ||
 		    strcmp(entry->name, "rename-window") == 0 ||
 		    strcmp(entry->name, "resize-window") == 0) &&
 		    target->w != NULL &&
-		    remote_window_id_for(r, target->w, &id) == 0) {
-			xasprintf(&line, "%s -t @%u", entry->name, id);
-		} else if ((strcmp(entry->name, "select-pane") == 0 ||
+		    remote_window_id_for(r, target->w, &id) == 0)
+			xasprintf(&remote_target, "@%u", id);
+		else if ((strcmp(entry->name, "select-pane") == 0 ||
 		    strcmp(entry->name, "kill-pane") == 0 ||
 		    strcmp(entry->name, "resize-pane") == 0) &&
 		    target->wp != NULL &&
-		    remote_pane_id_for(r, target->wp, &id) == 0) {
-			xasprintf(&line, "%s -t %%%u", entry->name, id);
-		} else {
+		    remote_pane_id_for(r, target->wp, &id) == 0)
+			xasprintf(&remote_target, "%%%u", id);
+		else {
 			cmdq_error(item, "targeted remote command not "
 			    "supported yet");
+			return (-1);
+		}
+		line = remote_rewrite_target(cmd, remote_target);
+		free(remote_target);
+		if (line == NULL) {
+			cmdq_error(item, "cannot rewrite remote target");
 			return (-1);
 		}
 	} else
@@ -932,18 +968,6 @@ remote_set_active_window(struct remote *r)
 }
 
 /* Bootstrap step 0: ask for the new (JSON) layout format. */
-static void
-remote_bootstrap_refresh(struct remote *r, struct remote_query *q)
-{
-	struct remote_query	*q2;
-	u_int			 sid = q->window_id;
-
-	q2 = remote_query_new(remote_bootstrap_windows, remote_bootstrap_error);
-	q2->window_id = sid;
-	remote_run(r, q2, "list-windows -t $%u -F \"#{window_id}\\t"
-	    "#{window_index}\\t#{window_name}\\t#{window_layout}\\t"
-	    "#{window_active}\"", sid);
-}
 
 /* Bootstrap step 1: list remote windows. */
 static void
@@ -1350,9 +1374,11 @@ remote_session_changed(struct remote *r, u_int id, char *name)
 	r->booted = 0;
 	r->booting = 1;
 
-	q = remote_query_new(remote_bootstrap_refresh, remote_bootstrap_error);
+	q = remote_query_new(remote_bootstrap_windows, remote_bootstrap_error);
 	q->window_id = id;
-	remote_run(r, q, "refresh-client -f new-layouts");
+	remote_run(r, q, "list-windows -t $%u -F \"#{window_id}\\t"
+	    "#{window_index}\\t#{window_name}\\t#{window_layout}\\t"
+	    "#{window_active}\"", id);
 }
 
 /* Remote window was added. */

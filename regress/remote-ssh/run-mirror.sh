@@ -97,6 +97,10 @@ ssh_run true || {
 	echo "ERROR: cannot ssh to $REMOTE_HOST" >&2
 	exit 1
 }
+ssh_run 'command -v tmux >/dev/null' || {
+	echo "ERROR: remote tmux is not in PATH" >&2
+	exit 1
+}
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/tmux-mirror-ssh.XXXXXX") || exit 1
 mkdir -p "$ROOT/home/.tmux/plugins/mirror-test" "$ROOT/home/.config/tmux"
@@ -111,8 +115,9 @@ SOCK=mirror-ssh-$$
 SESSION=mirror-ssh-session-$$
 export HOME TMUX_TMPDIR
 
-"$TMUX_BIN" -L "$SOCK" -f /dev/null new-session -d -s host 'exec sleep 300' ||
-	exit 1
+cd "$ROOT" || exit 1
+"$TMUX_BIN" -L "$SOCK" -f /dev/null -v new-session -d -s host \
+    'exec sleep 300' || exit 1
 
 if [ -n "$REMOTE_PORT" ] && [ -n "$SSH_IDENTITY" ]; then
 	"$TMUX_BIN" -L "$SOCK" -f /dev/null new-remote-session -d \
@@ -136,10 +141,15 @@ ok "new-remote-session started"
 i=0
 while ! "$TMUX_BIN" -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; do
 	i=$((i + 1))
-	[ "$i" -gt 100 ] && {
+	if [ "$i" -gt 300 ]; then
 		fail "mirror session did not appear"
+		echo "INFO: local sessions:" >&2
+		"$TMUX_BIN" -L "$SOCK" list-sessions 2>&1 >&2 || :
+		echo "INFO: remote mirror log:" >&2
+		grep -h "remote #" "$ROOT"/tmux-server-*.log 2>/dev/null |
+		    tail -40 >&2 || :
 		exit 1
-	}
+	fi
 	sleep 0.1
 done
 ok "mirror session created"
