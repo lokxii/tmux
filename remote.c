@@ -494,28 +494,6 @@ remote_create_session(struct remote *r)
 	free(base);
 }
 
-/*
- * Destroy a session and any others in its group, detaching any clients first,
- * exactly as the server does when a session is killed. The server version of
- * this is static in server-fn.c.
- */
-static void
-remote_destroy_session_group(struct session *s)
-{
-	struct session_group	*sg;
-	struct session		*s1;
-
-	if ((sg = session_group_contains(s)) == NULL) {
-		server_destroy_session(s);
-		session_destroy(s, 1, __func__);
-	} else {
-		TAILQ_FOREACH_SAFE(s, &sg->sessions, gentry, s1) {
-			server_destroy_session(s);
-			session_destroy(s, 1, __func__);
-		}
-	}
-}
-
 /* Destroy the local mirror session immediately. Event loop contexts only. */
 static void
 remote_destroy_session_now(struct remote *r)
@@ -534,7 +512,7 @@ remote_destroy_session_now(struct remote *r)
 
 	/* A session with no windows cannot currently be destroyed. */
 	if (s != NULL && s->curw != NULL)
-		remote_destroy_session_group(s);
+		server_destroy_session_group(s);
 }
 
 /* Deferred destruction of the mirror session; runs in the event loop. */
@@ -554,7 +532,7 @@ remote_destroy_session_cb(__unused int fd, __unused short events, void *arg)
 		 */
 		r->session = NULL;
 		if (s->curw != NULL)
-			remote_destroy_session_group(s);
+			server_destroy_session_group(s);
 	}
 	if (r->free_pending) {
 		/* The control connection is gone: finish freeing the remote. */
@@ -564,9 +542,11 @@ remote_destroy_session_cb(__unused int fd, __unused short events, void *arg)
 
 	/*
 	 * The remote may still be connected: its session can be switched and
-	 * rebuilt or a new one attached, so resume processing it.
+	 * rebuilt or a new one attached, so resume processing it. But never
+	 * resume a stream whose bootstrap has timed out: it is being torn
+	 * down.
 	 */
-	if (r->event != NULL)
+	if (r->event != NULL && !r->boot_timed_out)
 		bufferevent_enable(r->event, EV_READ|EV_WRITE);
 }
 
@@ -1328,11 +1308,22 @@ remote_bootstrap_timer(__unused int fd, __unused short events, void *arg)
 
 	/*
 	 * Stop the control stream and tear the remote down from the event
-	 * loop, using the same deferral as remote_session_destroyed().
+	 * loop, using the same deferral and the same one-callback rule as
+	 * remote_session_destroyed(): exactly one deferred callback may be
+	 * pending for a remote. If a destruction is already scheduled, mark
+	 * it to finish the teardown; if a free is already scheduled, it will.
 	 */
 	remote_fail_wait(r, "timed out waiting for the remote session");
 	if (r->event != NULL)
 		bufferevent_disable(r->event, EV_READ|EV_WRITE);
+	if (r->destroy_session != NULL) {
+		/* The pending destroy callback will free the remote. */
+		r->free_pending = 1;
+		return;
+	}
+	if (r->free_pending)
+		return;
+	r->free_pending = 1;
 	event_once(-1, EV_TIMEOUT, remote_free_cb, r, NULL);
 }
 
@@ -1937,16 +1928,10 @@ remote_free_cb(__unused int fd, __unused short events, void *arg)
 	 * The session is normally already gone, but if the control connection
 	 * died without the remote session being closed it is still here:
 	 * destroy it now, from the event loop, where it is safe to detach
-	 * clients.
+	 * clients. remote_free() kills the job and frees the remote.
 	 */
 	if (r->session != NULL)
 		remote_destroy_session_now(r);
-
-	if (r->job != NULL) {
-		job_free(r->job);
-		r->job = NULL;
-	}
-	r->event = NULL;
 	remote_free(r);
 }
 
@@ -2010,6 +1995,16 @@ remote_free(struct remote *r)
 	 */
 	if (r->session != NULL)
 		remote_destroy_session_now(r);
+
+	/*
+	 * The job must die with the remote, whatever path frees it: this is
+	 * terminal for the whole connection, not only the session.
+	 */
+	if (r->job != NULL) {
+		job_free(r->job);
+		r->job = NULL;
+	}
+	r->event = NULL;
 
 	remote_reset(r, 1);
 	free(r->session_name);

@@ -28,7 +28,7 @@
 
 #include "tmux.h"
 
-static void	server_destroy_session_group(struct session *);
+void	server_destroy_session_group(struct session *);
 static void	server_fire_pane_exit(const char *, struct window_pane *);
 
 static void
@@ -438,7 +438,7 @@ server_destroy_pane(struct window_pane *wp, int notify)
 	}
 }
 
-static void
+void
 server_destroy_session_group(struct session *s)
 {
 	struct session_group	*sg;

@@ -3480,6 +3480,7 @@ int	 server_link_window(struct session *,
 void	 server_unlink_window(struct session *, struct winlink *);
 void	 server_destroy_pane(struct window_pane *, int);
 void	 server_destroy_session(struct session *);
+void	 server_destroy_session_group(struct session *);
 void	 server_check_unattached(void);
 void	 server_unzoom_window(struct window *);
 
