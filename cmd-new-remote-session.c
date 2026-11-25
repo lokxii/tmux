@@ -248,8 +248,12 @@ remote_default_name(const char *host)
 	memcpy(out, "remote-", 7);
 	q = out + 7;
 	for (; *p != '\0'; p++) {
-		if (isalnum((unsigned char)*p) || *p == '.' || *p == '-' ||
-		    *p == '_')
+		/*
+		 * Do not keep '.' (or ':') in session names: tmux treats them
+		 * as window/pane separators in -t targets, including the -t to
+		 * attach-session.
+		 */
+		if (isalnum((unsigned char)*p) || *p == '-' || *p == '_')
 			*q++ = *p;
 		else if (*p == ':' || *p == '[' || *p == ']')
 			continue;
@@ -442,7 +446,7 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 	char			*cause = NULL;
 	const char		*runtime;
 	char			*command = NULL, *helper = NULL;
-	char			*escaped, *tmp, *rhost = NULL;
+	char			*escaped, *tmp, *rhost = NULL, *p;
 	char			**argv = NULL, **rargv = NULL;
 	int			 argc = 0, rargc = 0;
 	int			 offset = 0, inside = 0, force, detached;
@@ -496,6 +500,15 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 		}
 		name = clean_name(ename, 0);
 		free(ename);
+		/*
+		 * Avoid '.' and ':' in the session name: tmux treats them as
+		 * window/pane separators in -t targets, so a dotted name (for
+		 * example an IP address) cannot be attached by name.
+		 */
+		for (p = name; *p != '\0'; p++) {
+			if (*p == '.' || *p == ':')
+				*p = '_';
+		}
 	} else
 		name = remote_default_name(host);
 
@@ -537,10 +550,8 @@ cmd_new_remote_session_exec(struct cmd *self, struct cmdq_item *item)
 			goto fail;
 		}
 		if (!detached) {
-			escaped = args_escape(name);
-			remote_queue(item, inside ? "switch-client -t %s" :
-			    "attach-session -t %s", escaped);
-			free(escaped);
+			remote_queue(item, inside ? "switch-client -t $%u" :
+			    "attach-session -t $%u", s->id);
 		}
 		goto done;
 	}

@@ -104,6 +104,7 @@ struct remote {
 	char			*host;
 	char			*port;
 	char			*token;
+	char			*error;
 	int			 name_locked;
 	u_int			 session_id;
 	int			 booting;
@@ -1030,7 +1031,7 @@ remote_attach(struct remote *r)
 {
 	struct cmd_parse_result	*pr;
 	struct cmdq_item	*item;
-	char			*name, *line;
+	char			*line;
 
 	if (r->wait_item == NULL || r->session == NULL)
 		return;
@@ -1040,12 +1041,14 @@ remote_attach(struct remote *r)
 		r->wait_client = NULL;
 		return;
 	}
-	name = args_escape(r->session->name);
+	/*
+	 * Use the session ID, not the name: a name containing '.' or ':' is
+	 * parsed as a window/pane target by attach-session and switch-client.
+	 */
 	if (r->wait_inside)
-		xasprintf(&line, "switch-client -t %s", name);
+		xasprintf(&line, "switch-client -t $%u", r->session->id);
 	else
-		xasprintf(&line, "attach-session -t %s", name);
-	free(name);
+		xasprintf(&line, "attach-session -t $%u", r->session->id);
 
 	pr = cmd_parse_from_string(line, NULL);
 	free(line);
@@ -1122,8 +1125,8 @@ remote_bootstrap_error(struct remote *r, struct remote_query *q)
 	line = evbuffer_readln(r->reply, NULL, EVBUFFER_EOL_LF);
 	remote_log(r, "command failed: %s: %s", q->command,
 	    line == NULL ? "unknown error" : line);
+	remote_fail_wait(r, line == NULL ? "remote bootstrap failed" : line);
 	free(line);
-	remote_fail_wait(r, "remote bootstrap failed");
 }
 
 /* Start mirroring a new remote control stream. */
@@ -1205,7 +1208,8 @@ remote_job_complete(struct job *job)
 	remote_log(r, "remote process exited");
 	r->job = NULL;
 	r->event = NULL;
-	remote_fail_wait(r, "control connection exited");
+	remote_fail_wait(r, r->error != NULL ? r->error :
+	    "control connection exited");
 	remote_free(r);
 }
 
@@ -1270,6 +1274,15 @@ remote_reply_end(struct remote *r, char *line, int error)
 	if (t != r->reply_time || n != r->reply_number) {
 		remote_log(r, "reply metadata mismatch");
 		return;
+	}
+
+	if (error && (f & 1) == 0) {
+		line = evbuffer_readln(r->reply, NULL, EVBUFFER_EOL_LF);
+		if (line != NULL) {
+			free(r->error);
+			r->error = line;
+			remote_log(r, "error: %s", r->error);
+		}
 	}
 
 	if (f & 1) {
@@ -1674,6 +1687,7 @@ remote_free(struct remote *r)
 	free(r->host);
 	free(r->port);
 	free(r->token);
+	free(r->error);
 	evbuffer_free(r->reply);
 	TAILQ_REMOVE(&remotes, r, entry);
 	free(r);

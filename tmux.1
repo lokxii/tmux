@@ -1466,16 +1466,18 @@ specified multiple times.
 .Op Ar user@host Op Ar shell\-command Op Ar argument ...
 .Xc
 .D1 Pq alias: Ic newr
-Create a new local session whose initial pane runs
-.Xr ssh 1
-to
-.Ar user@host
-and starts or attaches a tmux session there.
-The remote command is
-.Ql tmux new\-session \-A
-with the
+Create a local session mirroring a tmux session on
+.Ar user@host ,
+using SSH and tmux control mode.
+A private remote tmux server is started on a random socket with the local
+configuration copied to it and attached with
+.Ql tmux \-C ;
+remote windows and panes are mirrored into local windows and panes.
+The
 .Ic new\-session
-flags given to this command, so an existing remote session is attached.
+flags given to this command are passed to the remote
+.Ic new\-session ,
+and an existing remote session with the same name is reused.
 The host may be given with
 .Fl H
 instead of as the first positional argument; if
@@ -1484,13 +1486,20 @@ is used all positional arguments are part of
 .Ar shell\-command .
 Flags must precede the positional host.
 .Pp
+.Fl s
+selects the session name.
+Dots and colons in the name are replaced with underscores, because tmux treats
+them as window and pane separators in
+.Fl t
+targets, including the target used to attach the mirror.
+.Pp
 .Fl i
 selects the SSH private key file, equivalent to
 .Xr ssh 1 Ns 's
 .Fl i
 flag.
-The file is passed to the SSH clients used for both the configuration copy and
-the interactive remote session.
+The file is passed to the SSH clients used for the configuration copy and for
+the control-mode connection.
 .Pp
 Outside tmux the mirrored session is attached to the current terminal.
 When run from a pane inside tmux, the invoking client switches to the mirrored

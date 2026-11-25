@@ -59,6 +59,9 @@ new-remote-session [-AdDEPRX] [-c start-directory] [-e environment]
 - Host comes from `-H` or the first positional argument.
 - `-p` is the SSH port, `-i` the SSH identity file.
 - `-R` forces a reconnect path and is accepted for compatibility.
+- Session names are normalized: `.` and `:` become `_`, because tmux treats
+  them as window/pane separators in `-t` targets (the default name derived
+  from a host such as an IP address would otherwise be unattachable).
 - Remote creation forwards `new-session` options (`-c`, `-e`, `-E`, `-F`,
   `-f`, `-n`, `-P`, `-t`, `-x`, `-X`, `-y`, and the shell command).
 - `-d` starts the mirror without attaching/switching the client.

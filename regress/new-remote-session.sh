@@ -122,4 +122,21 @@ $TMUX kill-session -t key-test || exit 1
 # A different host cannot reuse the same local session name.
 $TMUX new-remote-session -d -H other.test -s remote-test >/dev/null 2>&1 &&
 	exit 1
+
+# The default name is derived from the host with dots removed: a name with
+# dots cannot be attached by name (tmux treats '.' as a pane separator).
+$TMUX new-remote-session -d -H example.test || exit 1
+wait_session remote-example_test || exit 1
+[ "$($TMUX list-sessions -F '#{@remote_session}' |
+    grep -F remote-example_test)" = remote-example_test ] || exit 1
+$TMUX kill-session -t remote-example_test || exit 1
+
+# Explicit dotted and colon names are normalized for the same reason.
+$TMUX new-remote-session -d -H example.test -s dotted.name || exit 1
+wait_session dotted_name || exit 1
+$TMUX has-session -t dotted_name || exit 1
+$TMUX kill-session -t dotted_name || exit 1
+$TMUX new-remote-session -d -H example.test -s 'a:b.c' || exit 1
+wait_session a_b_c || exit 1
+$TMUX kill-session -t a_b_c || exit 1
 exit 0
